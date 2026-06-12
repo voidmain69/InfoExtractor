@@ -3,7 +3,7 @@ import threading
 from cachetools import TTLCache
 
 from config import settings
-from models import AttributeResponse
+from models import AttributeResponse, ProductQuery
 
 _cache: TTLCache = TTLCache(
     maxsize=settings.cache_max_size,
@@ -12,8 +12,22 @@ _cache: TTLCache = TTLCache(
 _lock = threading.Lock()
 
 
-def make_key(product: str, attribute: str, max_sources: int, official_only: bool = False) -> tuple:
-    return (product.lower().strip(), attribute.lower().strip(), max_sources, official_only)
+def make_key(
+    product: ProductQuery,
+    attribute: str,
+    max_sources: int,
+    official_only: bool = False,
+) -> tuple:
+    return (
+        (product.ean13 or "").lower(),
+        (product.upc or "").lower(),
+        (product.article or "").lower(),
+        (product.brand or "").lower(),
+        product.name.lower().strip(),
+        attribute.lower().strip(),
+        max_sources,
+        official_only,
+    )
 
 
 def get(key: tuple) -> AttributeResponse | None:

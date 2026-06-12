@@ -5,11 +5,11 @@ import logging
 import httpx
 
 from config import settings
-from models import ExtractionCandidate, ExtractionMethod, FetchedPage, SourceResult
+from models import ExtractionCandidate, ExtractionMethod, FetchedPage, ProductQuery, SourceResult
 
 logger = logging.getLogger(__name__)
 
-_http_client = httpx.AsyncClient(timeout=settings.page_fetch_timeout_seconds + 10)
+_http_client = httpx.AsyncClient(timeout=settings.llm_extraction_timeout_seconds + 5)
 
 _SYSTEM_PROMPT = (
     "You are a product specification extractor. "
@@ -19,14 +19,32 @@ _SYSTEM_PROMPT = (
     'Respond ONLY with JSON: {"found": bool, "value": string|null, "unit": string|null, "confidence": float}'
 )
 
+_WINDOW = 2500  # chars around the attribute keyword hit
+
+
+def _focused_text(text: str, attribute: str, window: int = _WINDOW) -> str:
+    """Return a focused window around the first occurrence of any attribute keyword."""
+    needle = attribute.lower()
+    # Try full attribute first, then each token
+    candidates = [needle] + [t for t in needle.split() if len(t) > 3]
+    for kw in candidates:
+        idx = text.lower().find(kw)
+        if idx >= 0:
+            start = max(0, idx - window // 2)
+            end = min(len(text), idx + window // 2)
+            return text[start:end]
+    # No hit — return the end of the text (specs are usually after navigation)
+    return text[-window * 2:] if len(text) > window * 2 else text
+
 
 class LLMExtractor:
     async def extract(
         self,
-        product: str,
+        product: ProductQuery,
         attribute: str,
         page: FetchedPage,
     ) -> ExtractionCandidate | None:
+        text_chunk = _focused_text(page.text, attribute)
         payload = {
             "model": settings.ollama_model,
             "messages": [
@@ -34,9 +52,9 @@ class LLMExtractor:
                 {
                     "role": "user",
                     "content": (
-                        f"Product: {product}\n"
+                        f"Product: {product.display_name()}\n"
                         f"Find attribute: {attribute}\n\n"
-                        f"Page text:\n{page.text[:6000]}"
+                        f"Page text:\n{text_chunk}"
                     ),
                 },
             ],
@@ -45,7 +63,7 @@ class LLMExtractor:
         try:
             result = await asyncio.wait_for(
                 self._call_ollama(payload),
-                timeout=settings.page_fetch_timeout_seconds + 8,
+                timeout=settings.llm_extraction_timeout_seconds,
             )
             return self._parse_result(result, page)
         except Exception as exc:

@@ -1,6 +1,6 @@
 import asyncio
 
-from models import ExtractionCandidate, FetchedPage, SearxNGResponse
+from models import ExtractionCandidate, FetchedPage, ProductQuery, SearxNGResponse
 
 from extractors.infobox import InfoboxExtractor
 from extractors.jsonld import JSONLDExtractor
@@ -11,20 +11,20 @@ _LLM_CONF_THRESHOLD = 0.8
 
 
 async def run_pipeline(
-    product: str,
+    product: ProductQuery,
     attribute: str,
     searxng_response: SearxNGResponse,
     pages: list[FetchedPage],
 ) -> list[ExtractionCandidate]:
     candidates: list[ExtractionCandidate] = []
 
-    candidates.extend(InfoboxExtractor().extract(product, attribute, searxng_response))
+    candidates.extend(InfoboxExtractor().extract(product.search_string(), attribute, searxng_response))
 
     jsonld = JSONLDExtractor()
     css = CSSExtractor()
     for page in pages:
-        candidates.extend(jsonld.extract(product, attribute, page))
-        candidates.extend(css.extract(product, attribute, page))
+        candidates.extend(jsonld.extract(product.search_string(), attribute, page))
+        candidates.extend(css.extract(product.search_string(), attribute, page))
 
     high_conf = [c for c in candidates if c.confidence >= _LLM_CONF_THRESHOLD]
     if not high_conf:

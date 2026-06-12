@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     max_sources: int = 5
 
     query_builder_timeout_seconds: float = 6.0
+    llm_extraction_timeout_seconds: float = 60.0
+
+    use_playwright: bool = True
+    playwright_timeout_seconds: float = 30.0
 
     user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
