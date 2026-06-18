@@ -1,0 +1,213 @@
+{
+  "info": {
+    "name": "getAttrService",
+    "description": "Product specification retrieval microservice.\n\nBase URL: {{base_url}} (default: http://localhost:8000)\n\nSet the `base_url` variable in the collection or environment.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health check",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": ["{{base_url}}"],
+              "path": ["health"]
+            },
+            "description": "Liveness check. Returns {\"status\": \"ok\"} when the service is running."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Attribute",
+      "item": [
+        {
+          "name": "ASUS H610M-K — rear USB ports",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/attribute?name=H610M-K&brand=ASUS&category=motherboard&attribute=rear USB ports",
+              "host": ["{{base_url}}"],
+              "path": ["attribute"],
+              "query": [
+                { "key": "name",      "value": "H610M-K" },
+                { "key": "brand",     "value": "ASUS" },
+                { "key": "category",  "value": "motherboard" },
+                { "key": "attribute", "value": "rear USB ports" }
+              ]
+            },
+            "description": "Extract a single attribute for a product.\n\n**Product fields:**\n- `name` (required) — product model name\n- `brand` — manufacturer\n- `category` — product type (improves query building)\n- `article` — SKU / article number\n- `ean13` — EAN-13 barcode (highest-priority identifier)\n- `upc` — UPC barcode\n\n**Request options:**\n- `attribute` (required) — the spec to look up\n- `max_sources` — pages to fetch, default 5 (range 1–10)\n- `official_only` — restrict to manufacturer's official site, default false"
+          },
+          "response": []
+        },
+        {
+          "name": "ASUS H610M-K — RAM slots",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/attribute?name=H610M-K&brand=ASUS&category=motherboard&attribute=memory slots",
+              "host": ["{{base_url}}"],
+              "path": ["attribute"],
+              "query": [
+                { "key": "name",      "value": "H610M-K" },
+                { "key": "brand",     "value": "ASUS" },
+                { "key": "category",  "value": "motherboard" },
+                { "key": "attribute", "value": "memory slots" }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "2E GAMING G3424B — curvature radius (official only)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/attribute?name=G3424B&brand=2E GAMING&category=monitor&article=2E-G3424B-01.UA&attribute=curvature radius&official_only=true",
+              "host": ["{{base_url}}"],
+              "path": ["attribute"],
+              "query": [
+                { "key": "name",          "value": "G3424B" },
+                { "key": "brand",         "value": "2E GAMING" },
+                { "key": "category",      "value": "monitor" },
+                { "key": "article",       "value": "2E-G3424B-01.UA" },
+                { "key": "attribute",     "value": "curvature radius" },
+                { "key": "official_only", "value": "true" }
+              ]
+            },
+            "description": "Restricts search to the manufacturer's official website.\n\n`official_only=true` triggers two extra steps:\n1. Resolve official domain via Ollama + SearxNG (e.g. `2egaming.com`)\n2. Filter all search results to that domain\n\nIf no official-site results are found, falls back to normal search and sets `official_only_fallback: true` in the response."
+          },
+          "response": []
+        },
+        {
+          "name": "By EAN-13 barcode",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/attribute?name=G3424B&brand=2E GAMING&ean13=4711081661634&attribute=refresh rate",
+              "host": ["{{base_url}}"],
+              "path": ["attribute"],
+              "query": [
+                { "key": "name",      "value": "G3424B" },
+                { "key": "brand",     "value": "2E GAMING" },
+                { "key": "ean13",     "value": "4711081661634" },
+                { "key": "attribute", "value": "refresh rate" }
+              ]
+            },
+            "description": "When `ean13` or `upc` is provided it becomes the primary search identifier (highest precision), replacing brand+name in the first query."
+          },
+          "response": []
+        },
+        {
+          "name": "Fewer sources (faster)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/attribute?name=H610M-K&brand=ASUS&attribute=TDP&max_sources=2",
+              "host": ["{{base_url}}"],
+              "path": ["attribute"],
+              "query": [
+                { "key": "name",        "value": "H610M-K" },
+                { "key": "brand",       "value": "ASUS" },
+                { "key": "attribute",   "value": "TDP" },
+                { "key": "max_sources", "value": "2" }
+              ]
+            },
+            "description": "`max_sources=2` fetches only 2 pages instead of the default 5. Faster but lower coverage."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Specs",
+      "item": [
+        {
+          "name": "ASUS H610M-K — all specs",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/specs?name=H610M-K&brand=ASUS&category=motherboard",
+              "host": ["{{base_url}}"],
+              "path": ["specs"],
+              "query": [
+                { "key": "name",     "value": "H610M-K" },
+                { "key": "brand",    "value": "ASUS" },
+                { "key": "category", "value": "motherboard" }
+              ]
+            },
+            "description": "Extract all product specifications as structured groups.\n\nReturns a list of `groups`, each with a `name` (section heading from the page) and `specs` (list of `{name, value}` pairs).\n\nIf the page has no section headings, all specs land in a single `\"Specifications\"` group.\n\n**Extraction order:**\n1. httpx fetch of top 4 candidate URLs in parallel\n2. Pick the page with the best score (total_specs × 2 + groups × 3)\n3. If score < 20: Playwright headless Chromium re-fetches the top URL, clicks spec tabs/buttons, and re-extracts"
+          },
+          "response": []
+        },
+        {
+          "name": "2E GAMING G3424B — all specs",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/specs?name=G3424B&brand=2E GAMING&article=2E-G3424B-01.UA",
+              "host": ["{{base_url}}"],
+              "path": ["specs"],
+              "query": [
+                { "key": "name",    "value": "G3424B" },
+                { "key": "brand",   "value": "2E GAMING" },
+                { "key": "article", "value": "2E-G3424B-01.UA" }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "All specs — official site only",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/specs?name=H610M-K&brand=ASUS&official_only=true",
+              "host": ["{{base_url}}"],
+              "path": ["specs"],
+              "query": [
+                { "key": "name",          "value": "H610M-K" },
+                { "key": "brand",         "value": "ASUS" },
+                { "key": "official_only", "value": "true" }
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Debug",
+      "item": [
+        {
+          "name": "SearxNG search proxy",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/search?q=ASUS H610M-K specifications",
+              "host": ["{{base_url}}"],
+              "path": ["search"],
+              "query": [
+                { "key": "q", "value": "ASUS H610M-K specifications" }
+              ]
+            },
+            "description": "Passes the query directly to SearxNG and returns the raw JSON response (results, infoboxes, answers). Useful for verifying that SearxNG is reachable and seeing what URLs it returns."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
