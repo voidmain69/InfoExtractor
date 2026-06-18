@@ -275,28 +275,51 @@ The LLM is given a focused ±2500-character text window around the attribute key
 
 ## Project structure
 
+The codebase follows a layered architecture with a strict dependency direction: `api → services → infrastructure → domain`. The `domain` layer is pure data (no I/O); `core` holds cross-cutting config/logging.
+
 ```
 getAttrService/
-├── main.py                      # FastAPI app — /attribute, /specs, /search, /health
-├── config.py                    # Pydantic-settings singleton (reads .env)
-├── models.py                    # All Pydantic v2 models
-├── cache.py                     # Thread-safe TTLCache wrapper
-├── query_builder.py             # Ollama → targeted search queries
-├── searxng_client.py            # Async SearxNG JSON API client
-├── page_fetcher.py              # Parallel httpx page fetcher + BS4 text extractor
-├── page_fetcher_js.py           # Playwright headless Chromium fetcher (for /specs)
-├── reconciler.py                # Weighted vote + fuzzy grouping
-├── official_site_resolver.py    # Resolves manufacturer domain via Ollama + SearxNG
-├── extractors/
-│   ├── __init__.py              # Pipeline orchestrator
-│   ├── infobox.py               # Stage 1: SearxNG infoboxes
-│   ├── jsonld.py                # Stage 2: JSON-LD schema.org
-│   ├── css_selectors.py         # Stage 3: site-specific + generic tables
-│   ├── llm_extractor.py         # Stage 4: Ollama fallback
-│   └── all_specs_extractor.py   # /specs: full-page spec extraction
-├── Dockerfile                   # python:3.11-slim-bookworm + playwright chromium
-├── docker-compose.yml
-├── requirements.txt
-├── .env                         # Local config (not committed)
-└── .env.example                 # Template
+├── main.py                          # Composition root: create_app() + lifespan wiring
+└── app/
+    ├── core/
+    │   ├── config.py                # Pydantic-settings singleton (reads .env)
+    │   └── logging.py               # Logging setup
+    ├── domain/                      # Pure Pydantic models, zero I/O
+    │   ├── product.py               # ProductQuery
+    │   ├── extraction.py            # ExtractionMethod, SourceResult, ExtractionCandidate
+    │   ├── specs.py                 # SpecEntry, SpecGroup
+    │   ├── page.py                  # FetchedPage, SearxNGResult, SearxNGResponse
+    │   └── responses.py             # AttributeResponse, SpecsResponse
+    ├── api/
+    │   ├── deps.py                  # FastAPI Depends providers (product query, services)
+    │   └── routes/
+    │       ├── attribute.py         # GET /attribute
+    │       ├── specs.py             # GET /specs
+    │       └── system.py            # GET /health, GET /search
+    ├── services/                    # Application orchestration
+    │   ├── attribute_service.py     # Single-attribute workflow
+    │   ├── specs_service.py         # All-specs workflow (+ Playwright fallback)
+    │   ├── official_site.py         # Manufacturer-domain resolution
+    │   └── url_filter.py            # Domain-match helper
+    ├── infrastructure/              # Adapters to external systems
+    │   ├── llm/ollama.py            # Single Ollama gateway: chat() + chat_json()
+    │   ├── search/searxng.py        # Async SearxNG JSON API client
+    │   ├── fetch/http_fetcher.py    # Parallel httpx fetcher + BS4 text extractor
+    │   ├── fetch/browser_fetcher.py # Playwright headless Chromium fetcher
+    │   ├── cache/ttl_cache.py       # Thread-safe TTLCache wrapper
+    │   └── query/query_builder.py   # Ollama → targeted search queries
+    └── extraction/                  # Extraction pipeline (domain logic)
+        ├── pipeline.py              # 4-stage orchestrator
+        ├── reconciler.py            # Weighted vote + fuzzy grouping
+        ├── base.py                  # BaseExtractor ABC
+        ├── all_specs.py             # /specs full-page spec extraction
+        └── extractors/
+            ├── infobox.py           # Stage 1: SearxNG infoboxes
+            ├── jsonld.py            # Stage 2: JSON-LD schema.org
+            ├── css_selectors.py     # Stage 3: site-specific + generic tables
+            └── llm.py               # Stage 4: Ollama fallback
+├── Dockerfile / docker-compose.yml / requirements.txt
+└── .env / .env.example
 ```
+
+All Ollama interaction goes through the single `OllamaGateway` (`app/infrastructure/llm/ollama.py`); the shared `httpx.AsyncClient` for Ollama + SearxNG is created once in `main.py`'s lifespan and closed on shutdown.
