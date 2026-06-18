@@ -21,6 +21,16 @@ class Settings(BaseSettings):
     use_playwright: bool = True
     playwright_timeout_seconds: float = 30.0
 
+    # Protects the single Ollama model server from concurrent batch requests.
+    # 0 disables the limit.
+    ollama_max_concurrency: int = 4
+
+    # Batch /attributes resolution tuning.
+    resolve_max_concurrency: int = 4
+    resolve_targeted_fallback: bool = True
+    resolve_match_threshold: float = 0.78  # spec-pool fuzzy name match
+    normalize_timeout_seconds: float = 30.0
+
     user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "

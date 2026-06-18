@@ -32,7 +32,7 @@ def match_score(product: ProductQuery, page: FetchedPage) -> float:
     html_lower = page.html.lower()
 
     # Exact identifier present on the page → near-certain match.
-    for ident in (product.ean13, product.upc, product.article):
+    for ident in (product.ean13, product.upc, product.mpn, product.article):
         if ident and ident.lower() in html_lower:
             return 1.0
 
@@ -57,3 +57,13 @@ def match_score(product: ProductQuery, page: FetchedPage) -> float:
 
     score = max(coverage - penalty, fuzzy * 0.6)
     return max(0.0, min(1.0, score))
+
+
+def keep_relevant(product: ProductQuery, pages: list[FetchedPage]) -> list[FetchedPage]:
+    """Drop pages about a different product; never return empty if any page exists."""
+    relevant = [p for p in pages if match_score(product, p) >= MATCH_FLOOR]
+    if relevant:
+        return relevant
+    if pages:
+        return [max(pages, key=lambda p: match_score(product, p))]
+    return []

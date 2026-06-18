@@ -4,6 +4,7 @@ from fastapi import Query, Request
 
 from app.domain.product import ProductQuery
 from app.services.attribute_service import AttributeService
+from app.services.resolve_service import ResolveService
 from app.services.specs_service import SpecsService
 
 
@@ -31,6 +32,10 @@ def get_attribute_service(request: Request) -> AttributeService:
 
 def get_specs_service(request: Request) -> SpecsService:
     return request.app.state.specs_service
+
+
+def get_resolve_service(request: Request) -> ResolveService:
+    return request.app.state.resolve_service
 
 
 def get_searxng(request: Request):

@@ -16,6 +16,7 @@ def make_key(
     return (
         (product.ean13 or "").lower(),
         (product.upc or "").lower(),
+        (product.mpn or "").lower(),
         (product.article or "").lower(),
         (product.brand or "").lower(),
         product.name.lower().strip(),

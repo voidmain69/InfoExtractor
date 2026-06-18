@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from app.domain.attributes import ResolvedAttribute
 from app.domain.extraction import SourceResult
 from app.domain.product import ProductQuery
 from app.domain.specs import SpecGroup
@@ -25,4 +26,10 @@ class SpecsResponse(BaseModel):
     groups: list[SpecGroup]
     source_url: str | None = None
     total_specs: int = 0
+    cached: bool = False
+
+
+class ResolveResponse(BaseModel):
+    product: ProductQuery
+    results: list[ResolvedAttribute]
     cached: bool = False
