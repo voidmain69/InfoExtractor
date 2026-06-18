@@ -37,5 +37,15 @@ class Settings(BaseSettings):
         "Chrome/125.0.0.0 Safari/537.36"
     )
 
+    # Anti-blocking: retry behaviour for HTTP fetcher
+    fetch_retry_attempts: int = 3       # max retries on 429/503/403
+    fetch_retry_backoff: float = 1.0    # base backoff seconds (doubles per retry)
+    fetch_jitter_max: float = 0.4       # max random sleep before each request
+
+    # Anti-blocking: comma-separated proxy URLs, e.g.
+    #   http://user:pass@proxy1:3128,http://user:pass@proxy2:3128
+    # Leave empty to disable.
+    proxy_list: str = ""
+
 
 settings = Settings()
