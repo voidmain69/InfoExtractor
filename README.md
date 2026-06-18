@@ -114,6 +114,7 @@ Find the value of one specific attribute for a product.
 | `brand` | No | Manufacturer / brand. E.g. `ASUS`, `2E GAMING`. Improves search precision and official-site detection. |
 | `category` | No | Product category. E.g. `motherboard`, `monitor`. Helps the query builder. |
 | `article` | No | Article number / SKU. E.g. `2E-G3424B-01.UA`. Used for exact-match search. |
+| `mpn` | No | Manufacturer part number. Used for exact-match search and identity verification. |
 | `ean13` | No | EAN-13 barcode. Highest-priority identifier when provided. |
 | `upc` | No | UPC barcode. |
 
@@ -245,6 +246,82 @@ curl "http://localhost:8000/specs?name=G3424B&brand=2E+GAMING&article=2E-G3424B-
 | `groups[].specs` | List of `{name, value}` pairs in page order. |
 | `source_url` | The single page that produced the best (most specs) result. |
 | `total_specs` | Total number of individual spec entries across all groups. |
+
+---
+
+### `POST /attributes` — Batch typed resolution
+
+Resolve **many typed attributes for one product** in a single request. The product's
+source pages are fetched and parsed **once**, every attribute is resolved against that
+shared content, and an AI layer then coerces each value to the requested type, converts
+units, and snaps to the allowed-value list.
+
+Prefer this over many concurrent `GET /attribute` calls: attributes of one product
+overwhelmingly come from the same pages, so batching avoids re-searching/re-fetching and
+sharply reduces load on the single Ollama/SearxNG backend. A 1-element array is a valid
+"single attribute" request.
+
+#### Request body
+
+```jsonc
+{
+  "product": {                       // same fields as GET /attribute, plus mpn
+    "name": "G3424B", "brand": "2E GAMING", "category": "monitor",
+    "article": "2E-G3424B-01.UA", "mpn": null, "ean13": null, "upc": null
+  },
+  "attributes": [
+    { "name": "Refresh rate", "type": "number", "unit": "Hz",
+      "allowed_values": ["60","120","144","165","180"] },
+    { "name": "Panel type",   "type": "enum", "allowed_values": ["IPS","VA","TN","OLED"] },
+    { "name": "Curvature",    "type": "string" }
+  ],
+  "official_only": false,
+  "max_sources": 5
+}
+```
+
+| Field | Description |
+|---|---|
+| `attributes[].name` | Attribute / characteristic to resolve. |
+| `attributes[].type` | `string` \| `number` \| `integer` \| `boolean` \| `enum`. Drives coercion. |
+| `attributes[].unit` | Optional desired output unit. The AI layer converts if the source uses another unit. |
+| `attributes[].allowed_values` | Optional candidate set. The AI layer snaps the value to the closest match or reports none. |
+| `official_only` | Restrict to the manufacturer's official site (same behaviour as elsewhere). |
+| `max_sources` | Pages to fetch for the shared pool (1–10). |
+
+#### Response
+
+```jsonc
+{
+  "product": { ... },
+  "results": [
+    {
+      "name": "Refresh rate", "type": "number",
+      "value": "180", "unit": "Hz", "raw_value": "180 Hz",
+      "matched_allowed": true,
+      "confidence": 0.81,                                  // always present
+      "source_url": "https://2egaming.com/.../g3424b/",    // page the value came from
+      "status": "found",
+      "sources": [ { "url": "...", "extraction_method": "css_selector", "confidence": 0.86 } ]
+    }
+  ],
+  "cached": false
+}
+```
+
+| Field | Description |
+|---|---|
+| `value` | Normalized/coerced/unit-converted result (or the snapped allowed value). |
+| `raw_value` | The text extracted from the page before normalization. |
+| `unit` | Unit of `value` (target unit if converted). |
+| `matched_allowed` | When `allowed_values` was given: `true` if `value` is one of them, else `false`; `null` otherwise. |
+| `confidence` | Extraction confidence × normalization certainty. **Always returned.** |
+| `source_url` | URL of the page the value was extracted from. **Always returned for found values.** |
+| `status` | `found` \| `not_found` \| `ambiguous` (had data but no allowed value matched). |
+| `sources` | Full provenance (every corroborating source for this value). |
+
+Per-attribute results are cached, so re-running a batch (or overlapping batches) returns
+cached attributes instantly and only resolves the misses.
 
 ---
 

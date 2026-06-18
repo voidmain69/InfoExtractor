@@ -189,6 +189,47 @@
       ]
     },
     {
+      "name": "Resolve (batch)",
+      "item": [
+        {
+          "name": "2E monitor — typed batch (enum + unit + string)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": {
+              "raw": "{{base_url}}/attributes",
+              "host": ["{{base_url}}"],
+              "path": ["attributes"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product\": {\n    \"name\": \"G3424B\",\n    \"brand\": \"2E GAMING\",\n    \"category\": \"monitor\",\n    \"article\": \"2E-G3424B-01.UA\"\n  },\n  \"attributes\": [\n    { \"name\": \"Refresh rate\", \"type\": \"number\", \"unit\": \"Hz\", \"allowed_values\": [\"60\",\"120\",\"144\",\"165\",\"180\"] },\n    { \"name\": \"Response time\", \"type\": \"number\", \"unit\": \"ms\" },\n    { \"name\": \"Panel type\", \"type\": \"enum\", \"allowed_values\": [\"IPS\",\"VA\",\"TN\",\"OLED\"] },\n    { \"name\": \"Curvature\", \"type\": \"string\" }\n  ],\n  \"official_only\": false,\n  \"max_sources\": 5\n}"
+            },
+            "description": "Batch-resolve several typed attributes for one product in a single request.\n\nThe product pages are fetched/parsed once; each attribute is resolved against the shared content; then the AI layer coerces to `type`, converts to `unit`, and snaps to `allowed_values`.\n\nEach result returns `value`, `raw_value`, `unit`, `matched_allowed`, `confidence`, `source_url` (page the value came from), `status` (found|not_found|ambiguous), and `sources`."
+          },
+          "response": []
+        },
+        {
+          "name": "ASUS motherboard — typed batch (one shared fetch)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": {
+              "raw": "{{base_url}}/attributes",
+              "host": ["{{base_url}}"],
+              "path": ["attributes"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"product\": {\n    \"name\": \"H610M-K\",\n    \"brand\": \"ASUS\",\n    \"category\": \"motherboard\"\n  },\n  \"attributes\": [\n    { \"name\": \"Memory slots\", \"type\": \"integer\" },\n    { \"name\": \"Max memory\", \"type\": \"number\", \"unit\": \"GB\" },\n    { \"name\": \"Form factor\", \"type\": \"string\" }\n  ]\n}"
+            },
+            "description": "Several attributes of one product resolved from a single shared page fetch."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
       "name": "Debug",
       "item": [
         {
