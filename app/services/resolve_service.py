@@ -13,6 +13,12 @@ from app.domain.extraction import ExtractionCandidate, SourceResult
 from app.domain.page import FetchedPage, SearxNGResponse
 from app.domain.product import ProductQuery
 from app.domain.responses import ResolveResponse
+from app.extraction.coerce import (
+    coerce_boolean,
+    coerce_integer,
+    coerce_number,
+    snap_enum,
+)
 from app.extraction.pipeline import ExtractionPipeline
 from app.extraction.reconciler import reconcile
 from app.extraction.value_cleaner import clean_value
@@ -29,6 +35,7 @@ from app.services.attribute_matcher import (
 from app.services.official_site import OfficialSiteResolver
 from app.services.product_match import keep_relevant
 from app.services.semantic_matcher import SemanticMatcher
+from app.services.synonyms import find_synonym_label
 from app.services.source_ranking import rank_sources
 from app.services.url_filter import url_matches_domain
 from app.services.value_normalizer import NormItem, ValueNormalizer
@@ -95,13 +102,25 @@ class ResolveService:
         if misses:
             pool = await self._build_pool(product, official_only, max_sources)
 
-            # 2a. One semantic-match call maps every requested attribute onto the
-            # page's actual labels by meaning (synonyms / translations).
+            # 2a. Map every requested attribute onto the page's actual labels by
+            # meaning. A curated synonym table resolves the well-known cases
+            # deterministically; only the leftovers go to the LLM semantic call.
             semantic_labels: list[str | None] = [None] * len(misses)
-            if pool.specs:
-                semantic_labels = await self._semantic_matcher.match(
-                    [spec.name for _, spec in misses], pool_labels(pool.specs)
-                )
+            labels = pool_labels(pool.specs) if pool.specs else []
+            if labels:
+                unresolved_idx: list[int] = []
+                unresolved_names: list[str] = []
+                for j, (_, spec) in enumerate(misses):
+                    syn = find_synonym_label(spec.name, labels)
+                    if syn is not None:
+                        semantic_labels[j] = syn
+                    else:
+                        unresolved_idx.append(j)
+                        unresolved_names.append(spec.name)
+                if unresolved_names:
+                    llm_labels = await self._semantic_matcher.match(unresolved_names, labels)
+                    for j, lbl in zip(unresolved_idx, llm_labels):
+                        semantic_labels[j] = lbl
 
             # 2b. Resolve raw values for all misses (bounded concurrency).
             raw_list = await asyncio.gather(
@@ -231,13 +250,16 @@ class ResolveService:
             if not raw.raw_value:
                 results[idx] = _not_found(spec)
                 continue
-            # Deterministic shortcut: plain string with no unit / allowed values.
-            if spec.type == AttrType.STRING and not spec.unit and not spec.allowed_values:
-                value, derived_unit = clean_value(raw.raw_value, spec.name)
+            # Deterministic coercion first — reliable and free; only defer to the
+            # LLM normalizer when local parsing can't confidently resolve it.
+            det = _coerce(spec, raw.raw_value)
+            if det is not None:
+                value, unit, matched, conf = det
                 results[idx] = ResolvedAttribute(
-                    name=spec.name, type=spec.type, value=value, unit=derived_unit,
-                    raw_value=raw.raw_value, matched_allowed=None,
-                    confidence=raw.confidence, source_url=raw.source_url,
+                    name=spec.name, type=spec.type, value=value, unit=unit,
+                    raw_value=raw.raw_value, matched_allowed=matched,
+                    confidence=round(raw.confidence * conf, 4),
+                    source_url=raw.source_url,
                     status=ResolveStatus.FOUND, sources=raw.sources,
                 )
                 continue
@@ -322,3 +344,48 @@ def _not_found(spec: AttributeSpec) -> ResolvedAttribute:
         matched_allowed=None, confidence=0.0, source_url=None,
         status=ResolveStatus.NOT_FOUND, sources=[],
     )
+
+
+def _coerce(
+    spec: AttributeSpec, raw_value: str
+) -> tuple[str, str | None, bool | None, float] | None:
+    """Deterministically coerce a raw value to the requested type.
+
+    Returns (value, unit, matched_allowed, confidence) or None to defer to the
+    LLM normalizer (ambiguous unit conversion or an enum that didn't snap)."""
+    allowed = spec.allowed_values
+    value: str | None
+    unit: str | None = None
+    conf = 0.85
+
+    if spec.type == AttrType.INTEGER:
+        value = coerce_integer(raw_value)
+        conf = 0.9
+    elif spec.type == AttrType.NUMBER:
+        res = coerce_number(raw_value, spec.unit)
+        if res is None:
+            return None
+        value, unit, conf = res.value, res.unit, res.confidence
+    elif spec.type == AttrType.BOOLEAN:
+        value = coerce_boolean(raw_value)
+        conf = 0.9
+    elif spec.type == AttrType.ENUM or allowed:
+        snapped, matched = snap_enum(raw_value, allowed or [])
+        if not matched:
+            return None  # let the LLM try a fuzzier match
+        return snapped, None, True, 0.9
+    else:  # STRING
+        value, unit = clean_value(raw_value, spec.name)
+
+    if value is None:
+        return None
+
+    # Snap a coerced numeric/string onto an allowed list when one is given
+    # (e.g. number 180 → allowed ["60","120","180"]).
+    if allowed:
+        snapped, matched = snap_enum(value, allowed)
+        if not matched:
+            return None  # defer; LLM may convert/round to a listed value
+        return snapped, unit or spec.unit, True, conf
+
+    return value, unit or spec.unit, None, conf

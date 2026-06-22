@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 
 from app.core.config import settings
 from app.domain.page import FetchedPage
+from app.extraction.text_repair import fix_text
 
 logger = logging.getLogger(__name__)
 
@@ -162,5 +163,6 @@ def _extract_text(html: str) -> str:
     for tag in soup.find_all(_REMOVE_TAGS):
         tag.decompose()
     text = soup.get_text(separator=" ")
+    text = fix_text(text)
     text = _WS_RE.sub(" ", text).strip()
     return text[:8000]

@@ -1,13 +1,21 @@
-"""Post-process a reconciled value: trim verbose blobs and split out the unit."""
+"""Post-process a reconciled value: repair text, trim verbose blobs, split unit."""
 from __future__ import annotations
 
 import re
+import unicodedata
+
+from app.extraction.text_repair import fix_text
 
 # number + unit, e.g. "180 Hz", "1ms", "34\"", "300 cd/m2", "96GB", "2.1 V"
 _UNIT_RE = re.compile(
     r"(\d+(?:[.,]\d+)?)\s*"
     r'(TB|GB|MB|KB|GHz|MHz|Hz|ms|mm|cm|nm|kg|nits|cd/m2|px|bit|W|V|A|"|°|inch|inches)\b',
     re.I,
+)
+
+# A glued dimensions clause, e.g. "9.2 inch x 8.0 inch" or "23.4 cm x 20.3 cm".
+_DIM_TAIL_RE = re.compile(
+    r"\d+(?:[.,]\d+)?\s*(?:inch|inches|in|cm|mm)\b", re.I,
 )
 
 # Sibling section markers: if the attribute asks about one side but the value
@@ -20,6 +28,8 @@ _SIBLINGS: list[tuple[str, str]] = [
     ("external", "internal"),
 ]
 
+_STOPWORDS = {"of", "the", "a", "type", "size"}
+
 
 def extract_unit(value: str) -> str | None:
     m = _UNIT_RE.search(value)
@@ -29,10 +39,37 @@ def extract_unit(value: str) -> str | None:
     return '"' if unit == '"' else unit
 
 
+def _strip_leading_symbols(s: str) -> str:
+    """Drop leading emoji/bullets/symbols, e.g. '✔️ CURVED R1500' → 'CURVED R1500'."""
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if (ch.isspace() or ch == "️" or unicodedata.combining(ch)
+                or unicodedata.category(ch)[0] == "S" or ch in "•‣◦·"):
+            i += 1
+        else:
+            break
+    return s[i:].strip()
+
+
+def _strip_attr_echo(value: str, attribute: str) -> str:
+    """Drop a trailing echo of the attribute label, e.g. value 'micro-ATX Form
+    Factor' for attribute 'Form factor' → 'micro-ATX'."""
+    attr_tokens = [t for t in re.findall(r"[a-z0-9]+", attribute.lower())
+                   if t not in _STOPWORDS]
+    if not attr_tokens:
+        return value
+    tokens = value.split()
+    # Peel attribute-name words off the end (case-insensitive).
+    while tokens and tokens[-1].lower().strip(".,;:-") in attr_tokens:
+        tokens.pop()
+    stripped = " ".join(tokens).strip(" ,;:-—–")
+    return stripped or value
+
+
 def clean_value(value: str, attribute: str) -> tuple[str, str | None]:
     """Return (possibly-trimmed value, unit-or-None)."""
-    unit = extract_unit(value)
-    cleaned = value.strip()
+    cleaned = fix_text(value).strip()
 
     attr_lower = attribute.lower()
     val_lower = cleaned.lower()
@@ -42,10 +79,24 @@ def clean_value(value: str, attribute: str) -> tuple[str, str | None]:
         if side in attr_lower and side in val_lower and other in val_lower:
             other_idx = val_lower.find(other)
             side_idx = val_lower.find(side)
-            # Only cut if the other side comes *after* the requested side and
-            # there is enough content before it to be a real value.
             if other_idx > side_idx and other_idx > 10:
                 cleaned = cleaned[:other_idx].strip(" ,;-—–")
                 break
+
+    # Trim a glued dimensions tail when there's real content before it, e.g.
+    # "micro-ATX Form Factor9.2 inch x 8.0 inch (...)" → "micro-ATX Form Factor".
+    dim = _DIM_TAIL_RE.search(cleaned)
+    if dim and dim.start() >= 3 and "x" in cleaned[dim.start():].lower():
+        head = cleaned[:dim.start()].strip(" ,;:-—–(")
+        if head:
+            cleaned = head
+
+    # Remove a trailing echo of the attribute label and leading symbols/emoji.
+    cleaned = _strip_attr_echo(cleaned, attribute)
+    cleaned = _strip_leading_symbols(cleaned)
+
+    # Derive the unit from the FINAL value so a trimmed-away dimension tail can't
+    # leak its unit (e.g. the "inch" from a stripped "9.2 inch x 8.0 inch").
+    unit = extract_unit(cleaned)
 
     return cleaned, unit

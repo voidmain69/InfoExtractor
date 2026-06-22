@@ -5,6 +5,7 @@ import re
 from bs4 import BeautifulSoup, Tag
 
 from app.domain.specs import SpecEntry, SpecGroup
+from app.extraction.text_repair import fix_text
 
 _SKIP_TAGS = frozenset({"script", "style", "nav", "footer", "header", "aside", "head", "noscript"})
 _HEADING_TAGS = frozenset({"h2", "h3", "h4"})
@@ -28,7 +29,7 @@ _DEFAULT_GROUP = "Specifications"
 
 
 def _norm(s: str) -> str:
-    return re.sub(r"\s+", " ", s).strip()
+    return re.sub(r"\s+", " ", fix_text(s)).strip()
 
 
 def _class_str(tag: Tag) -> str:
