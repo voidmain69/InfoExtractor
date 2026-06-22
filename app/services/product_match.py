@@ -59,11 +59,21 @@ def match_score(product: ProductQuery, page: FetchedPage) -> float:
     return max(0.0, min(1.0, score))
 
 
-def keep_relevant(product: ProductQuery, pages: list[FetchedPage]) -> list[FetchedPage]:
-    """Drop pages about a different product; never return empty if any page exists."""
-    relevant = [p for p in pages if match_score(product, p) >= MATCH_FLOOR]
-    if relevant:
-        return relevant
-    if pages:
-        return [max(pages, key=lambda p: match_score(product, p))]
-    return []
+def keep_relevant(
+    product: ProductQuery,
+    pages: list[FetchedPage],
+    top_n: int | None = None,
+) -> list[FetchedPage]:
+    """Drop pages about a different product; never return empty if any page exists.
+
+    When `top_n` is given, keep only the highest-scoring pages — this trims noisy
+    extras (vendor listings, download pages) that would otherwise pollute a merged
+    spec pool and degrade attribute matching."""
+    scored = [(match_score(product, p), p) for p in pages]
+    relevant = [(s, p) for s, p in scored if s >= MATCH_FLOOR]
+    if not relevant and scored:
+        relevant = [max(scored, key=lambda sp: sp[0])]
+    relevant.sort(key=lambda sp: sp[0], reverse=True)
+    if top_n is not None:
+        relevant = relevant[:top_n]
+    return [p for _, p in relevant]

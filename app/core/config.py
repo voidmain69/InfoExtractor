@@ -47,5 +47,22 @@ class Settings(BaseSettings):
     # Leave empty to disable.
     proxy_list: str = ""
 
+    # SearxNG anti-throttle: cache identical search responses and pace outgoing
+    # queries so a single batch request can't burst the upstream engines into
+    # CAPTCHA/rate-limit territory.
+    searxng_cache_ttl_seconds: int = 1800
+    searxng_cache_max_size: int = 1000
+    searxng_min_interval_seconds: float = 0.34  # min spacing between queries
+    searxng_max_concurrency: int = 2            # parallel queries cap
+    searxng_retry_attempts: int = 2             # retry empty/failed responses
+    searxng_retry_backoff: float = 0.8
+
+    # /attributes pool shaping: cap the merged spec pool to the most relevant
+    # pages (drops vendor-list/download noise) and skip the per-attribute web
+    # fallback when the shared pool is already rich — that fallback is the main
+    # self-inflicted query burst that re-triggers engine throttling.
+    resolve_pool_max_pages: int = 3
+    resolve_pool_rich_threshold: int = 40
+
 
 settings = Settings()

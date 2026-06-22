@@ -145,7 +145,7 @@ class ResolveService:
         pages = await self._fetch_pages(top_urls, titles) if top_urls else []
         logger.info("/attributes fetched %d pages, statuses: %s",
                     len(pages), [(p.url.split("/")[2], p.status_code) for p in pages])
-        pages = keep_relevant(product, pages)
+        pages = keep_relevant(product, pages, top_n=settings.resolve_pool_max_pages)
         logger.info("/attributes keep_relevant kept %d pages", len(pages))
 
         pool_entries = build_spec_pool(pages)
@@ -182,8 +182,13 @@ class ResolveService:
             if not candidates and pool.pages:
                 candidates = await self._pipeline.run(product, spec.name, pool.merged, pool.pages)
 
-            # Targeted per-attribute fallback (own small search).
-            if not candidates and settings.resolve_targeted_fallback and not official_only:
+            # Targeted per-attribute fallback (own small search). Skip it when the
+            # shared pool is already rich: the attribute is almost certainly present,
+            # so a miss is a matching problem, not missing data — firing a fresh
+            # search per attribute would just burst the engines back into throttling.
+            pool_is_rich = len(pool.specs) >= settings.resolve_pool_rich_threshold
+            if (not candidates and settings.resolve_targeted_fallback
+                    and not official_only and not pool_is_rich):
                 candidates = await self._targeted(product, spec.name, max_sources)
 
         value, _unit, confidence, _all = reconcile(candidates)
@@ -194,10 +199,12 @@ class ResolveService:
         self, product: ProductQuery, attribute: str, max_sources: int
     ) -> list[ExtractionCandidate]:
         try:
-            queries = await self._query_builder.build_queries(product, attribute)
+            # Keep the fallback cheap: fewer queries + a single best page, so it
+            # can't fan out into the burst that re-triggers engine throttling.
+            queries = (await self._query_builder.build_queries(product, attribute))[:2]
             responses = await asyncio.gather(*[self._searxng.search(q, num_results=8) for q in queries])
             ranked = rank_sources(responses, None)
-            top_urls = [u for u, _ in ranked][:2]
+            top_urls = [u for u, _ in ranked][:1]
             if not top_urls:
                 return []
             pages = keep_relevant(product, await self._fetch_pages(top_urls, dict(ranked)))
