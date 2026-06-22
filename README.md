@@ -4,6 +4,12 @@ A self-hosted microservice that retrieves specific product specifications from t
 
 All LLM operations use a locally deployed [Ollama](https://ollama.com/) instance — no external AI API calls are made.
 
+The service is built to stay reliable against real-world web friction:
+
+- **Anti-blocking fetcher** — rotating User-Agents/Accept-Language, exponential-backoff retries on `429/503/403`, request jitter, optional proxy rotation, and a stealth-patched headless Chromium.
+- **Anti-throttle search** — diversified SearxNG engine set, an in-process search-response cache, and an outbound rate limiter so a batch request can't burst the upstream engines into CAPTCHA.
+- **High-quality extraction** — mojibake repair (UTF-8 served as cp1252), deterministic type coercion + unit conversion, a curated synonym/translation matcher, and verbose-blob trimming, so values come back clean and correctly typed without leaning on the LLM for the easy cases.
+
 ---
 
 ## How it works
@@ -32,6 +38,28 @@ GET /attribute?name=H610M-K&brand=ASUS&attribute=rear+USB+ports
 
 For `/specs`, the same search flow is used but extraction collects **all** spec key-value pairs at once. If the initial httpx extraction yields few results, a headless Chromium (Playwright) instance fetches the page, clicks "Specifications" / "Характеристики" tabs if present, and re-extracts.
 
+For `POST /attributes` (batch typed resolution), the product's pages are fetched and parsed **once** into a shared spec pool, then every requested attribute is resolved against it:
+
+```
+POST /attributes  (product + list of typed attributes)
+         │
+    Per-attribute TTL cache check → resolve only the misses
+         │
+    Build shared pool once: rank → fetch top-N relevant pages → extract all specs
+         │
+    Match each attribute to a page label:
+      a) curated synonym/translation table   (deterministic; e.g. Refresh rate = Update frequency)
+      b) string-fuzzy match against the pool
+      c) one LLM semantic call for the leftovers
+      d) extraction pipeline / a cheap targeted search only if the pool lacks it
+         │
+    Normalize each value:
+      a) deterministic coercion  (integer, number+unit conversion, boolean, enum snap)
+      b) batched Ollama normalizer only for what coercion can't resolve
+         │
+    Cache found results → return ResolveResponse (value, confidence, source_url per attribute)
+```
+
 ---
 
 ## Requirements
@@ -46,6 +74,20 @@ search:
   formats:
     - html
     - json
+```
+
+For resilience against per-host throttling, configure a **diverse engine set** rather than relying on the CAPTCHA-prone defaults. On a datacenter IP, Google/DuckDuckGo/Startpage CAPTCHA quickly; Bing and Brave are reliable, with Mojeek/Qwant/Wikipedia as independents:
+```yaml
+outgoing:
+  retries: 0          # don't re-hit a blocked engine; rely on diversity
+engines:
+  - { name: bing,       engine: bing,       shortcut: b,  timeout: 5.0 }
+  - { name: brave,      engine: brave,      shortcut: br, timeout: 5.0 }
+  - { name: mojeek,     engine: mojeek,     shortcut: mj, timeout: 5.0 }
+  - { name: qwant,      engine: qwant,      shortcut: qw, timeout: 5.0 }
+  - { name: duckduckgo, engine: duckduckgo, shortcut: d,  timeout: 5.0 }
+  - { name: google,     engine: google,     shortcut: g,  timeout: 5.0 }
+  - { name: wikipedia,  engine: wikipedia,  shortcut: wp, timeout: 4.0 }
 ```
 
 ---
@@ -85,6 +127,39 @@ curl http://localhost:8000/health
 | `LLM_EXTRACTION_TIMEOUT_SECONDS` | `60.0` | Timeout for Ollama spec extraction per page. |
 | `USE_PLAYWRIGHT` | `true` | Enable Playwright JS rendering for `/specs`. Set `false` to disable. |
 | `PLAYWRIGHT_TIMEOUT_SECONDS` | `30.0` | Timeout for Playwright page load + clicks. |
+
+**Concurrency & batch resolution:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `OLLAMA_MAX_CONCURRENCY` | `4` | Global cap on concurrent Ollama calls (protects the single model server). `0` disables the limit. |
+| `RESOLVE_MAX_CONCURRENCY` | `4` | Max attributes resolved in parallel within one `POST /attributes` request. |
+| `RESOLVE_TARGETED_FALLBACK` | `true` | Allow a cheap per-attribute web search when the shared pool lacks the attribute. |
+| `RESOLVE_MATCH_THRESHOLD` | `0.78` | Fuzzy threshold for matching an attribute name to a spec-pool label. |
+| `RESOLVE_POOL_MAX_PAGES` | `3` | Cap the shared spec pool to the top-N most relevant pages (drops vendor-list/download noise). |
+| `RESOLVE_POOL_RICH_THRESHOLD` | `40` | If the pool has at least this many specs, skip the per-attribute web fallback (avoids self-throttling). |
+| `NORMALIZE_TIMEOUT_SECONDS` | `30.0` | Timeout for the batched Ollama normalization / semantic-match calls. |
+
+**Anti-blocking (page fetcher):**
+
+| Variable | Default | Description |
+|---|---|---|
+| `USER_AGENT` | Chrome UA | Base User-Agent (the fetcher also rotates through a built-in set of real browser UAs). |
+| `FETCH_RETRY_ATTEMPTS` | `3` | Max retries on `429/503/502/403` (respects `Retry-After`). |
+| `FETCH_RETRY_BACKOFF` | `1.0` | Base backoff seconds; doubles per retry. |
+| `FETCH_JITTER_MAX` | `0.4` | Max random delay (seconds) before each request, to avoid bursts. |
+| `PROXY_LIST` | `""` | Comma-separated proxy URLs (`http://user:pass@host:port,…`); one is picked per request/launch. Empty = direct. |
+
+**Anti-throttle (SearxNG client):**
+
+| Variable | Default | Description |
+|---|---|---|
+| `SEARXNG_CACHE_TTL_SECONDS` | `1800` | TTL for cached search responses (deduplicates overlapping queries). |
+| `SEARXNG_CACHE_MAX_SIZE` | `1000` | Max cached search responses. |
+| `SEARXNG_MIN_INTERVAL_SECONDS` | `0.34` | Minimum spacing between outgoing SearxNG queries. |
+| `SEARXNG_MAX_CONCURRENCY` | `2` | Max parallel SearxNG queries. |
+| `SEARXNG_RETRY_ATTEMPTS` | `2` | Retries when a search returns empty (engines transiently blocked). |
+| `SEARXNG_RETRY_BACKOFF` | `0.8` | Base backoff seconds between search retries. |
 
 ---
 
@@ -350,6 +425,20 @@ The LLM is given a focused ±2500-character text window around the attribute key
 
 ---
 
+## Value quality & normalization
+
+Applied across `/specs` and `POST /attributes` so values come back clean and correctly typed, with the LLM reserved for genuinely ambiguous cases:
+
+| Step | Module | What it does |
+|---|---|---|
+| **Mojibake repair** | `extraction/text_repair.py` | Fixes UTF-8 served as cp1252 (`IntelÂ®` → `Intel®`, `34â³` → `34″`, broken emoji) via `ftfy` + a latin-1↔utf-8 fallback, then NFC-normalizes. Applied to page text, spec-pool labels/values, and final values. |
+| **Synonym / translation match** | `services/synonyms.py` | A curated table resolves well-known label equivalences deterministically (`Refresh rate` = `Update frequency`, `Response time` = `Reaction time`, `Panel type` = `Type of matrix`, incl. UA/RU), before any LLM semantic call. |
+| **Deterministic coercion** | `extraction/coerce.py` | Parses the requested type locally: integer (`2 x DIMM slots` → `2`), number + unit conversion (`Max. 96GB` → `96 GB`; `MHz`↔`GHz`, `inch`↔`mm`, …), boolean, and enum snapping (`VA matrix` → `VA`, `180` → allowed list). |
+| **Blob trimming** | `extraction/value_cleaner.py` | Trims glued dimension tails and attribute-label echoes (`micro-ATX Form Factor9.2 inch x 8.0 inch` → `micro-ATX`), strips leading emoji/bullets, and derives the unit from the final value so a trimmed tail can't leak its unit. |
+| **LLM normalizer** | `services/value_normalizer.py` | One batched Ollama call, used only for the items deterministic coercion can't confidently resolve (fuzzy enum snapping, unusual unit conversions). |
+
+---
+
 ## Project structure
 
 The codebase follows a layered architecture with a strict dependency direction: `api → services → infrastructure → domain`. The `domain` layer is pure data (no I/O); `core` holds cross-cutting config/logging.
@@ -363,33 +452,45 @@ getAttrService/
     │   └── logging.py               # Logging setup
     ├── domain/                      # Pure Pydantic models, zero I/O
     │   ├── product.py               # ProductQuery
+    │   ├── attributes.py            # AttrType, AttributeSpec, ResolvedAttribute, ResolveRequest
     │   ├── extraction.py            # ExtractionMethod, SourceResult, ExtractionCandidate
     │   ├── specs.py                 # SpecEntry, SpecGroup
     │   ├── page.py                  # FetchedPage, SearxNGResult, SearxNGResponse
-    │   └── responses.py             # AttributeResponse, SpecsResponse
+    │   └── responses.py             # AttributeResponse, SpecsResponse, ResolveResponse
     ├── api/
     │   ├── deps.py                  # FastAPI Depends providers (product query, services)
     │   └── routes/
     │       ├── attribute.py         # GET /attribute
     │       ├── specs.py             # GET /specs
+    │       ├── resolve.py           # POST /attributes
     │       └── system.py            # GET /health, GET /search
     ├── services/                    # Application orchestration
     │   ├── attribute_service.py     # Single-attribute workflow
     │   ├── specs_service.py         # All-specs workflow (+ Playwright fallback)
+    │   ├── resolve_service.py       # POST /attributes batch orchestrator
+    │   ├── attribute_matcher.py     # Match attribute names to the spec pool (fuzzy)
+    │   ├── semantic_matcher.py      # LLM synonym/translation matcher
+    │   ├── synonyms.py              # Curated synonym/translation table (deterministic)
+    │   ├── value_normalizer.py      # Batched Ollama value normalizer
+    │   ├── product_match.py         # Page-vs-product relevance scoring / filtering
+    │   ├── source_ranking.py        # Rank candidate source URLs before fetching
     │   ├── official_site.py         # Manufacturer-domain resolution
     │   └── url_filter.py            # Domain-match helper
     ├── infrastructure/              # Adapters to external systems
-    │   ├── llm/ollama.py            # Single Ollama gateway: chat() + chat_json()
-    │   ├── search/searxng.py        # Async SearxNG JSON API client
-    │   ├── fetch/http_fetcher.py    # Parallel httpx fetcher + BS4 text extractor
-    │   ├── fetch/browser_fetcher.py # Playwright headless Chromium fetcher
+    │   ├── llm/ollama.py            # Single Ollama gateway (+ global concurrency limit)
+    │   ├── search/searxng.py        # SearxNG client (+ response cache + rate limiter)
+    │   ├── fetch/http_fetcher.py    # Parallel httpx fetcher (UA rotation, retries, proxy)
+    │   ├── fetch/browser_fetcher.py # Playwright Chromium fetcher (stealth, proxy)
     │   ├── cache/ttl_cache.py       # Thread-safe TTLCache wrapper
     │   └── query/query_builder.py   # Ollama → targeted search queries
     └── extraction/                  # Extraction pipeline (domain logic)
         ├── pipeline.py              # 4-stage orchestrator
         ├── reconciler.py            # Weighted vote + fuzzy grouping
         ├── base.py                  # BaseExtractor ABC
-        ├── all_specs.py             # /specs full-page spec extraction
+        ├── all_specs.py             # /specs full-page spec extraction + merge
+        ├── coerce.py                # Deterministic type coercion + unit conversion
+        ├── value_cleaner.py         # Blob trimming, leading-symbol strip, unit split
+        ├── text_repair.py           # Mojibake repair (ftfy + fallback) + NFC
         └── extractors/
             ├── infobox.py           # Stage 1: SearxNG infoboxes
             ├── jsonld.py            # Stage 2: JSON-LD schema.org
