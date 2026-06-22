@@ -141,8 +141,15 @@ class ResolveService:
 
         titles = dict(ranked)
         top_urls = [u for u, _ in ranked][:max_sources]
+        logger.info("/attributes top_urls: %s", top_urls)
         pages = await self._fetch_pages(top_urls, titles) if top_urls else []
+        logger.info("/attributes fetched %d pages, statuses: %s",
+                    len(pages), [(p.url.split("/")[2], p.status_code) for p in pages])
         pages = keep_relevant(product, pages)
+        logger.info("/attributes keep_relevant kept %d pages", len(pages))
+
+        pool_entries = build_spec_pool(pages)
+        logger.info("/attributes spec pool: %d entries", len(pool_entries))
 
         infoboxes, answers = _merge_boxes(responses)
         merged = SearxNGResponse(
@@ -150,7 +157,7 @@ class ResolveService:
             infoboxes=infoboxes,
             answers=answers,
         )
-        return _Pool(pages=pages, merged=merged, specs=build_spec_pool(pages))
+        return _Pool(pages=pages, merged=merged, specs=pool_entries)
 
     # ── per-attribute raw extraction ─────────────────────────────────────
 

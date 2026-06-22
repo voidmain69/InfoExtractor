@@ -38,9 +38,11 @@ _RETRY_STATUSES = {429, 503, 502, 403}
 def _random_headers() -> dict[str, str]:
     return {
         "User-Agent": random.choice(_USER_AGENTS),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": random.choice(_ACCEPT_LANGUAGES),
-        "Accept-Encoding": "gzip, deflate, br",
+        # Note: omit "br" — brotli decompression requires the optional brotlicffi package.
+        # httpx sets Accept-Encoding automatically when decompression is available.
+        "Accept-Encoding": "gzip, deflate",
         "DNT": "1",
         "Upgrade-Insecure-Requests": "1",
     }
