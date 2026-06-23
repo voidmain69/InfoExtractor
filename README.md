@@ -6,7 +6,7 @@ All LLM operations use a locally deployed [Ollama](https://ollama.com/) instance
 
 The service is built to stay reliable against real-world web friction:
 
-- **Anti-blocking fetcher** — rotating User-Agents/Accept-Language, exponential-backoff retries on `429/503/403`, request jitter, optional proxy rotation, and a stealth-patched headless Chromium.
+- **Anti-blocking fetcher** — rotating browser profiles where the User-Agent, `Sec-CH-UA` Client Hints and `Sec-Fetch-*`/`Referer` headers stay mutually consistent (so cross-checks don't flag the request), rotating `Accept-Language`, exponential-backoff retries on `429/503/403`, request jitter, optional proxy rotation, and a stealth-patched headless Chromium.
 - **Anti-throttle search** — diversified SearxNG engine set, an in-process search-response cache, and an outbound rate limiter so a batch request can't burst the upstream engines into CAPTCHA.
 - **High-quality extraction** — mojibake repair (UTF-8 served as cp1252), deterministic type coercion + unit conversion, a curated synonym/translation matcher, and verbose-blob trimming, so values come back clean and correctly typed without leaning on the LLM for the easy cases.
 
@@ -36,7 +36,12 @@ GET /attribute?name=H610M-K&brand=ASUS&attribute=rear+USB+ports
     Cache result → return AttributeResponse
 ```
 
-For `/specs`, the same search flow is used but extraction collects **all** spec key-value pairs at once. If the initial httpx extraction yields few results, a headless Chromium (Playwright) instance fetches the page, clicks "Specifications" / "Характеристики" tabs if present, and re-extracts.
+For `/specs`, the same search flow is used but extraction collects **all** spec key-value pairs at once. If the initial httpx extraction yields few results, a headless Chromium (Playwright) instance renders the page and actively **reveals specs hidden behind JS** before re-extracting:
+
+1. **Dismiss consent overlays** — cookie/GDPR banners (uk/ru/en, plus common id/class selectors) are closed first so they stop intercepting clicks.
+2. **Scroll** the page in steps to trigger lazy-loaded spec sections.
+3. **Open spec tabs/sections** — "Specifications" / "Технічні характеристики" / "Характеристики" tabs, buttons, or links (a spec *link* often leads to the full spec page).
+4. **Expand collapsed content** — repeatedly clicks "Show more" / "Докладніше" / "Показати ще" / "Развернуть" buttons and force-opens every `<details>` / `aria-expanded` accordion, over several passes (expanding one block frequently unveils more), with link-clicks deliberately avoided here so we never navigate off the page.
 
 For `POST /attributes` (batch typed resolution), the product's pages are fetched and parsed **once** into a shared spec pool, then every requested attribute is resolved against it:
 
@@ -127,6 +132,8 @@ curl http://localhost:8000/health
 | `LLM_EXTRACTION_TIMEOUT_SECONDS` | `60.0` | Timeout for Ollama spec extraction per page. |
 | `USE_PLAYWRIGHT` | `true` | Enable Playwright JS rendering for `/specs`. Set `false` to disable. |
 | `PLAYWRIGHT_TIMEOUT_SECONDS` | `30.0` | Timeout for Playwright page load + clicks. |
+| `PLAYWRIGHT_SCORE_THRESHOLD` | `25` | Trigger the JS render when the best static spec score is below this. Higher = lower barrier (Playwright runs more often). |
+| `PLAYWRIGHT_MAX_URLS` | `2` | Render up to this many of the top URLs with Playwright (concurrently) and merge the specs each reveals. |
 
 **Concurrency & batch resolution:**
 
