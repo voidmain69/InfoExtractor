@@ -46,29 +46,28 @@ print(f"parsed {len(proxies)} proxies: {proxies}  ({PASS if len(proxies) == 3 el
 section("Retry logic (429 → 503 → 200)")
 
 async def _test_retry():
-    from app.infrastructure.fetch.http_fetcher import _get_with_retry
+    from app.infrastructure.fetch import http_fetcher as hf
 
     call_count = 0
     responses = [
-        MagicMock(status_code=429, headers={}),
-        MagicMock(status_code=503, headers={}),
-        MagicMock(status_code=200, headers={}, text="<html>ok</html>"),
+        hf._RawResponse(429, {}, ""),
+        hf._RawResponse(503, {}, ""),
+        hf._RawResponse(200, {}, "<html>ok</html>"),
     ]
 
-    async def fake_get(url, headers=None):
+    # _get_with_retry now follows/validates redirects via _request_once; patch
+    # that seam so the retry test stays focused on status-driven retries.
+    async def fake_request_once(client, url):
         nonlocal call_count
         r = responses[min(call_count, len(responses) - 1)]
         call_count += 1
         return r
 
-    client = MagicMock()
-    client.get = fake_get
-
     async def no_sleep(t):
         pass
 
-    with patch("asyncio.sleep", no_sleep):
-        result = await _get_with_retry(client, "http://example.com")
+    with patch.object(hf, "_request_once", fake_request_once), patch("asyncio.sleep", no_sleep):
+        result = await hf._get_with_retry(MagicMock(), "http://example.com")
 
     ok = result is not None and result.status_code == 200 and call_count == 3
     print(f"attempts: {call_count}, final status: {result.status_code}  ({PASS if ok else FAIL})")
@@ -80,19 +79,16 @@ asyncio.run(_test_retry())
 section("Retry exhaustion (all 429) → returns None")
 
 async def _test_exhaust():
-    from app.infrastructure.fetch.http_fetcher import _get_with_retry
+    from app.infrastructure.fetch import http_fetcher as hf
 
-    async def always_429(url, headers=None):
-        return MagicMock(status_code=429, headers={})
-
-    client = MagicMock()
-    client.get = always_429
+    async def always_429(client, url):
+        return hf._RawResponse(429, {}, "")
 
     async def no_sleep(t):
         pass
 
-    with patch("asyncio.sleep", no_sleep):
-        result = await _get_with_retry(client, "http://example.com")
+    with patch.object(hf, "_request_once", always_429), patch("asyncio.sleep", no_sleep):
+        result = await hf._get_with_retry(MagicMock(), "http://example.com")
 
     print(f"result is None: {result is None}  ({PASS if result is None else FAIL})")
 
@@ -107,17 +103,16 @@ async def _test_jitter():
     cfg.settings.fetch_jitter_max = 0.2
     cfg.settings.fetch_retry_attempts = 1
 
-    async def fake_get(url, headers=None):
-        return MagicMock(status_code=200, headers={}, text="ok")
+    from app.infrastructure.fetch import http_fetcher as hf
 
-    client = MagicMock()
-    client.get = fake_get
+    async def fake_request_once(client, url):
+        return hf._RawResponse(200, {}, "ok")
+
     sem = asyncio.Semaphore(5)
-
-    from app.infrastructure.fetch.http_fetcher import _fetch_single
-    start = time.monotonic()
-    await asyncio.gather(*[_fetch_single(f"http://ex.com/{i}", "", sem, client) for i in range(5)])
-    elapsed = time.monotonic() - start
+    with patch.object(hf, "_request_once", fake_request_once):
+        start = time.monotonic()
+        await asyncio.gather(*[hf._fetch_single(f"http://ex.com/{i}", "", sem, MagicMock()) for i in range(5)])
+        elapsed = time.monotonic() - start
     print(f"elapsed: {elapsed:.3f}s  ({PASS if elapsed > 0.02 else 'WARN: no jitter detected'})")
 
 asyncio.run(_test_jitter())
@@ -181,6 +176,44 @@ cases = [
 for rx, text, expected in cases:
     got = rx.search(text) is not None
     print(f"  {PASS if got == expected else FAIL}: match {text!r} == {expected}")
+
+
+# ── 9. SSRF guard: block internal addresses & non-http schemes ───────────────
+section("SSRF guard (private/loopback/link-local + scheme)")
+from app.infrastructure.fetch.url_guard import _ip_blocked, is_safe_url
+
+blocked_ips = [
+    "127.0.0.1", "10.0.0.5", "192.168.1.1", "172.16.0.1", "169.254.169.254",
+    "100.64.0.1", "0.0.0.0", "::1", "::ffff:127.0.0.1", "fc00::1",
+]
+public_ips = ["8.8.8.8", "1.1.1.1", "93.184.216.34", "2606:4700:4700::1111"]
+
+ip_ok = True
+for ip in blocked_ips:
+    if not _ip_blocked(ip):
+        ip_ok = False
+        print(f"  {FAIL}: {ip} should be blocked")
+for ip in public_ips:
+    if _ip_blocked(ip):
+        ip_ok = False
+        print(f"  {FAIL}: {ip} should be allowed")
+print(f"IP classification correct: {ip_ok}  ({PASS if ip_ok else FAIL})")
+
+# Literal-IP and scheme checks need no DNS.
+scheme_cases = [
+    ("ftp://example.com/x", False),
+    ("file:///etc/passwd", False),
+    ("http://169.254.169.254/latest/meta-data/", False),  # cloud metadata
+    ("http://127.0.0.1:11434/", False),                    # local Ollama
+    ("http://[::1]/", False),
+]
+scheme_ok = True
+for url, expected in scheme_cases:
+    got = asyncio.run(is_safe_url(url))
+    if got != expected:
+        scheme_ok = False
+        print(f"  {FAIL}: is_safe_url({url!r}) == {got}, expected {expected}")
+print(f"scheme/internal URL rejection correct: {scheme_ok}  ({PASS if scheme_ok else FAIL})")
 
 
 print("\n--- all tests done ---")

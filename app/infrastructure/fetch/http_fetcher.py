@@ -9,11 +9,25 @@ from bs4 import BeautifulSoup
 from app.core.config import settings
 from app.domain.page import FetchedPage
 from app.extraction.text_repair import fix_text
+from app.infrastructure.fetch.url_guard import is_safe_url
 
 logger = logging.getLogger(__name__)
 
 _REMOVE_TAGS = {"script", "style", "nav", "footer", "header", "aside", "noscript"}
 _WS_RE = re.compile(r"\s{2,}")
+_MAX_REDIRECTS = 5
+
+
+class _RawResponse:
+    """Minimal response holder: redirects are followed manually so the raw
+    httpx.Response is consumed inside its streaming context."""
+
+    __slots__ = ("status_code", "headers", "text")
+
+    def __init__(self, status_code: int, headers: dict, text: str):
+        self.status_code = status_code
+        self.headers = headers
+        self.text = text
 
 # Realistic modern browser profiles. Each pairs a User-Agent with the matching
 # Client Hints (Sec-CH-UA*) so anti-bot systems that cross-check the two see a
@@ -119,9 +133,11 @@ async def fetch_pages(
 ) -> list[FetchedPage]:
     sem = asyncio.Semaphore(settings.max_concurrent_fetches)
     proxy = _pick_proxy()
+    # follow_redirects=False on purpose: we follow manually so every hop's host
+    # is re-validated against the SSRF guard (a 3xx is the classic bypass).
     async with httpx.AsyncClient(
         timeout=settings.page_fetch_timeout_seconds,
-        follow_redirects=True,
+        follow_redirects=False,
         proxy=proxy,
     ) as client:
         tasks = [_fetch_single(url, titles.get(url, ""), sem, client) for url in urls]
@@ -152,11 +168,7 @@ async def _fetch_single(
     if "noindex" in robots_tag or robots_tag.strip() == "none":
         return None
 
-    try:
-        html = resp.text
-    except Exception:
-        return None
-
+    html = resp.text
     text = _extract_text(html)
     return FetchedPage(
         url=url,
@@ -167,34 +179,96 @@ async def _fetch_single(
     )
 
 
+async def _read_capped(resp: httpx.Response) -> str | None:
+    """Read a streamed response body, bailing out past max_page_bytes.
+
+    Prevents a malicious/huge URL from exhausting memory: only the cap is ever
+    buffered, and Content-Length is short-circuited before any read.
+    """
+    cap = settings.max_page_bytes
+    cl = resp.headers.get("content-length")
+    if cl:
+        try:
+            if int(cl) > cap:
+                logger.debug("skip oversized response (%s bytes): %s", cl, resp.url)
+                return None
+        except ValueError:
+            pass
+    total = 0
+    chunks: list[bytes] = []
+    async for chunk in resp.aiter_bytes():
+        total += len(chunk)
+        if total > cap:
+            logger.debug("response exceeded %d bytes, dropping: %s", cap, resp.url)
+            return None
+        chunks.append(chunk)
+    raw = b"".join(chunks)
+    encoding = resp.encoding or "utf-8"
+    try:
+        return raw.decode(encoding, errors="replace")
+    except (LookupError, TypeError):
+        return raw.decode("utf-8", errors="replace")
+
+
+async def _request_once(
+    client: httpx.AsyncClient, url: str
+) -> _RawResponse | None:
+    """Issue a GET, following redirects manually and validating every hop.
+
+    Returns None when a hop is blocked by the SSRF guard, the body is too
+    large, or the redirect chain is too long.
+    """
+    current = url
+    for _ in range(_MAX_REDIRECTS + 1):
+        if not await is_safe_url(current):
+            logger.warning("blocked unsafe fetch URL: %s", current)
+            return None
+        async with client.stream("GET", current, headers=_random_headers()) as resp:
+            if resp.is_redirect:
+                location = resp.headers.get("location")
+                if not location:
+                    return _RawResponse(resp.status_code, dict(resp.headers), "")
+                current = str(resp.url.join(location))
+                continue
+            text = await _read_capped(resp)
+            if text is None:
+                return None
+            return _RawResponse(resp.status_code, dict(resp.headers), text)
+    logger.debug("too many redirects for %s", url)
+    return None
+
+
 async def _get_with_retry(
     client: httpx.AsyncClient, url: str
-) -> httpx.Response | None:
+) -> _RawResponse | None:
     attempts = max(1, settings.fetch_retry_attempts)
     backoff = settings.fetch_retry_backoff
     for attempt in range(attempts):
         try:
-            resp = await client.get(url, headers=_random_headers())
-            if resp.status_code not in _RETRY_STATUSES:
-                return resp
-            retry_after = _parse_retry_after(resp)
-            wait = retry_after if retry_after else backoff * (2 ** attempt)
-            logger.debug(
-                "fetch %s → %d, retry %d/%d in %.1fs",
-                url, resp.status_code, attempt + 1, attempts, wait,
-            )
-            await asyncio.sleep(wait)
+            resp = await _request_once(client, url)
         except Exception as exc:
             if attempt == attempts - 1:
                 logger.debug("fetch failed %s: %s", url, exc)
                 return None
             await asyncio.sleep(backoff * (2 ** attempt))
+            continue
+        # None means blocked/oversized/too-many-redirects — never retry those.
+        if resp is None:
+            return None
+        if resp.status_code not in _RETRY_STATUSES:
+            return resp
+        retry_after = _parse_retry_after(resp.headers.get("retry-after"))
+        wait = retry_after if retry_after else backoff * (2 ** attempt)
+        logger.debug(
+            "fetch %s → %d, retry %d/%d in %.1fs",
+            url, resp.status_code, attempt + 1, attempts, wait,
+        )
+        await asyncio.sleep(wait)
     logger.debug("fetch exhausted retries for %s", url)
     return None
 
 
-def _parse_retry_after(resp: httpx.Response) -> float | None:
-    header = resp.headers.get("retry-after")
+def _parse_retry_after(header: str | None) -> float | None:
     if not header:
         return None
     try:

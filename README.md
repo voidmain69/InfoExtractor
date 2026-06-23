@@ -134,6 +134,23 @@ curl http://localhost:8000/health
 | `PLAYWRIGHT_TIMEOUT_SECONDS` | `30.0` | Timeout for Playwright page load + clicks. |
 | `PLAYWRIGHT_SCORE_THRESHOLD` | `25` | Trigger the JS render when the best static spec score is below this. Higher = lower barrier (Playwright runs more often). |
 | `PLAYWRIGHT_MAX_URLS` | `2` | Render up to this many of the top URLs with Playwright (concurrently) and merge the specs each reveals. |
+| `PLAYWRIGHT_MAX_CONCURRENCY` | `2` | Cap on concurrent headless Chromium instances (memory guard). |
+
+**Security:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `API_KEY` | _(empty)_ | Required value of the `X-API-Key` header. **Empty disables auth** — every endpoint is then open. `/health` and the docs are always exempt. |
+| `RATE_LIMIT_REQUESTS` | `60` | Max requests per client IP per window. `0` disables the limit. |
+| `RATE_LIMIT_WINDOW_SECONDS` | `60.0` | Length of the rate-limit window (seconds). |
+| `MAX_PAGE_BYTES` | `3000000` | Hard cap on a fetched page body (memory-exhaustion guard). |
+| `SEARXNG_SAFESEARCH` | `1` | SearxNG content filter: `0`=off, `1`=moderate, `2`=strict. |
+
+> **Hardening notes**
+> - **SSRF:** every fetched/redirected URL (HTTP and Playwright) is resolved and rejected if it maps to a private, loopback, link-local, or otherwise non-public address. This blocks reaching internal services or cloud metadata via crafted search results or redirects.
+> - **Container:** the image runs as a non-root user (`uid 10001`). Chromium still uses `--no-sandbox` (the in-container sandbox needs privileges we don't grant), so run the container with a seccomp profile and a read-only root filesystem in production.
+> - **Auth:** set `API_KEY` before exposing the service anywhere beyond localhost. The `/search` endpoint is a thin proxy to SearxNG and is covered by the same auth.
+> - **Dependencies:** scan with `pip-audit -r requirements.txt` (or Dependabot) periodically — versions are pinned but drift behind security patches over time.
 
 **Concurrency & batch resolution:**
 

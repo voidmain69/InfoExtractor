@@ -101,7 +101,7 @@ class SearxNGClient:
             "q": query,
             "format": "json",
             "language": language,
-            "safesearch": "0",
+            "safesearch": str(settings.searxng_safesearch),
             "pageno": "1",
         }
         try:

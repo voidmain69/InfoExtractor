@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
 
+from app.api.middleware import APIKeyMiddleware, RateLimitMiddleware
 from app.api.routes import attribute, resolve, specs, system
 from app.core.config import settings
 from app.core.logging import configure_logging
@@ -60,6 +61,14 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="getAttrService", version="3.0.0", lifespan=lifespan)
+    # add_middleware stacks LIFO: the last added runs first. Add auth first and
+    # the rate limiter last so abusive callers are shed before the auth check.
+    app.add_middleware(APIKeyMiddleware, api_key=settings.api_key)
+    app.add_middleware(
+        RateLimitMiddleware,
+        max_requests=settings.rate_limit_requests,
+        window_seconds=settings.rate_limit_window_seconds,
+    )
     app.include_router(system.router)
     app.include_router(attribute.router)
     app.include_router(specs.router)

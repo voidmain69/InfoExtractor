@@ -20,6 +20,9 @@ class Settings(BaseSettings):
 
     use_playwright: bool = True
     playwright_timeout_seconds: float = 30.0
+    # Cap concurrent headless Chromium instances — each launch is heavy, so an
+    # unbounded burst of /specs requests could otherwise exhaust host memory.
+    playwright_max_concurrency: int = 2
     # /specs JS fallback: trigger a headless render whenever the best static
     # score is below this (higher = lower barrier, Playwright runs more often),
     # and render up to this many of the top URLs (not just one) to merge specs
@@ -42,6 +45,21 @@ class Settings(BaseSettings):
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/125.0.0.0 Safari/537.36"
     )
+
+    # Security: API key required in the X-API-Key header. Empty disables auth
+    # (dev only — the service is then an open SSRF/DoS proxy if exposed).
+    api_key: str = ""
+
+    # Edge rate limit: max requests per client IP per window. 0 disables it.
+    rate_limit_requests: int = 60
+    rate_limit_window_seconds: float = 60.0
+
+    # Hard cap on a fetched page body (bytes) — guards against memory-exhaustion
+    # from a hostile URL returning a huge response.
+    max_page_bytes: int = 3_000_000
+
+    # SearxNG content filter level: 0=off, 1=moderate, 2=strict.
+    searxng_safesearch: int = 1
 
     # Anti-blocking: retry behaviour for HTTP fetcher
     fetch_retry_attempts: int = 3       # max retries on 429/503/403

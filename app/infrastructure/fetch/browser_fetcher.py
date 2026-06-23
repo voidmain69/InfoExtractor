@@ -8,14 +8,29 @@ and then reveals every spec section it can find before returning the HTML.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
 import re
+from urllib.parse import urlparse
 
 from app.core.config import settings
 from app.infrastructure.fetch.http_fetcher import _USER_AGENTS, _pick_proxy
+from app.infrastructure.fetch.url_guard import is_safe_url
 
 logger = logging.getLogger(__name__)
+
+# Bound concurrent headless Chromium instances. Each browser launch is heavy;
+# without a cap, a burst of /specs requests can spawn enough browsers to exhaust
+# the host's memory. Created lazily so it binds to the running event loop.
+_pw_sem: asyncio.Semaphore | None = None
+
+
+def _browser_semaphore() -> asyncio.Semaphore:
+    global _pw_sem
+    if _pw_sem is None:
+        _pw_sem = asyncio.Semaphore(max(1, settings.playwright_max_concurrency))
+    return _pw_sem
 
 # Tabs/sections that hold specifications (uk / ru / en).
 _SPEC_TEXTS = [
@@ -208,9 +223,44 @@ async def _reveal_specs(page) -> None:
         pass
 
 
+def _make_route_guard():
+    """Abort any request (navigation or subresource) to a non-public host.
+
+    Headless Chromium executes page JS, so without this an attacker page could
+    pull internal resources (``<img src=http://169.254.169.254/...>`` etc.).
+    Decisions are cached per host to avoid re-resolving DNS for every asset.
+    """
+    host_cache: dict[str, bool] = {}
+
+    async def _guard(route):
+        try:
+            req_url = route.request.url
+            host = urlparse(req_url).hostname or ""
+            allowed = host_cache.get(host)
+            if allowed is None:
+                allowed = await is_safe_url(req_url)
+                host_cache[host] = allowed
+            if allowed:
+                await route.continue_()
+            else:
+                logger.debug("playwright blocked internal request: %s", req_url)
+                await route.abort()
+        except Exception:
+            try:
+                await route.abort()
+            except Exception:
+                pass
+
+    return _guard
+
+
 async def fetch_with_js(url: str) -> str | None:
     """Fetch URL via headless Chromium with stealth patches and spec reveal."""
     if not settings.use_playwright:
+        return None
+    # Validate before spending a browser launch on an internal/non-http target.
+    if not await is_safe_url(url):
+        logger.warning("playwright refused unsafe URL: %s", url)
         return None
     try:
         from playwright.async_api import async_playwright
@@ -225,25 +275,28 @@ async def fetch_with_js(url: str) -> str | None:
     proxy_cfg = {"server": proxy} if proxy else None
 
     try:
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=True, args=_BROWSER_ARGS)
-            ctx = await browser.new_context(
-                user_agent=ua,
-                viewport=viewport,
-                locale="en-US",
-                timezone_id="America/New_York",
-                proxy=proxy_cfg,
-            )
-            # Patch fingerprint in every frame before any script runs.
-            await ctx.add_init_script(_STEALTH_SCRIPT)
-            page = await ctx.new_page()
-            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-            await _dismiss_consent(page)
-            await _scroll_page(page)
-            await _reveal_specs(page)
-            html = await page.content()
-            await browser.close()
-            return html
+        async with _browser_semaphore():
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(headless=True, args=_BROWSER_ARGS)
+                ctx = await browser.new_context(
+                    user_agent=ua,
+                    viewport=viewport,
+                    locale="en-US",
+                    timezone_id="America/New_York",
+                    proxy=proxy_cfg,
+                )
+                # Block requests to internal hosts before any navigation starts.
+                await ctx.route("**/*", _make_route_guard())
+                # Patch fingerprint in every frame before any script runs.
+                await ctx.add_init_script(_STEALTH_SCRIPT)
+                page = await ctx.new_page()
+                await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                await _dismiss_consent(page)
+                await _scroll_page(page)
+                await _reveal_specs(page)
+                html = await page.content()
+                await browser.close()
+                return html
     except Exception as exc:
         logger.debug("playwright fetch failed for %s: %s", url, exc)
         return None
