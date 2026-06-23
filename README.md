@@ -213,9 +213,10 @@ Find the value of one specific attribute for a product.
 | `brand` | No | Manufacturer / brand. E.g. `ASUS`, `2E GAMING`. Improves search precision and official-site detection. |
 | `category` | No | Product category. E.g. `motherboard`, `monitor`. Helps the query builder. |
 | `article` | No | Article number / SKU. E.g. `2E-G3424B-01.UA`. Used for exact-match search. |
-| `mpn` | No | Manufacturer part number. Used for exact-match search and identity verification. |
 | `ean13` | No | EAN-13 barcode. Highest-priority identifier when provided. |
 | `upc` | No | UPC barcode. |
+
+> **Note:** `mpn` (manufacturer part number) is supported in `POST /attributes` request body but is **not** a query parameter for GET endpoints.
 
 **Request options:**
 
@@ -240,6 +241,7 @@ curl "http://localhost:8000/attribute?name=H610M-K&brand=ASUS&category=motherboa
     "category": "motherboard",
     "brand": "ASUS",
     "article": null,
+    "mpn": null,
     "ean13": null,
     "upc": null
   },
@@ -286,7 +288,7 @@ Retrieve all product specifications as structured groups.
 
 #### Query parameters
 
-Same product identity parameters as `/attribute` (`name`, `brand`, `category`, `article`, `ean13`, `upc`) plus:
+Same product identity parameters as `/attribute` — `name` (required), `brand`, `category`, `article`, `ean13`, `upc` — plus:
 
 | Parameter | Default | Description |
 |---|---|---|
@@ -309,6 +311,7 @@ curl "http://localhost:8000/specs?name=G3424B&brand=2E+GAMING&article=2E-G3424B-
     "category": null,
     "brand": "2E GAMING",
     "article": "2E-G3424B-01.UA",
+    "mpn": null,
     "ean13": null,
     "upc": null
   },
@@ -483,6 +486,7 @@ getAttrService/
     │   └── responses.py             # AttributeResponse, SpecsResponse, ResolveResponse
     ├── api/
     │   ├── deps.py                  # FastAPI Depends providers (product query, services)
+    │   ├── middleware.py            # APIKeyMiddleware (X-API-Key) + RateLimitMiddleware
     │   └── routes/
     │       ├── attribute.py         # GET /attribute
     │       ├── specs.py             # GET /specs
