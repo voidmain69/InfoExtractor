@@ -15,21 +15,61 @@ logger = logging.getLogger(__name__)
 _REMOVE_TAGS = {"script", "style", "nav", "footer", "header", "aside", "noscript"}
 _WS_RE = re.compile(r"\s{2,}")
 
-# Realistic modern browser User-Agents (rotated per request).
-_USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
+# Realistic modern browser profiles. Each pairs a User-Agent with the matching
+# Client Hints (Sec-CH-UA*) so anti-bot systems that cross-check the two see a
+# consistent fingerprint — a Chrome UA sending no/Firefox client hints is an
+# obvious tell. Firefox and Safari intentionally carry no Client Hints because
+# they don't send them in real traffic.
+_UA_PROFILES = [
+    {
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "ch_ua": '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
+        "platform": '"Windows"',
+    },
+    {
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0",
+        "ch_ua": '"Microsoft Edge";v="124", "Chromium";v="124", "Not-A.Brand";v="99"',
+        "platform": '"Windows"',
+    },
+    {
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "ch_ua": '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
+        "platform": '"macOS"',
+    },
+    {
+        "ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "ch_ua": '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="24"',
+        "platform": '"Linux"',
+    },
+    {
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
+        "ch_ua": None,
+        "platform": None,
+    },
+    {
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
+        "ch_ua": None,
+        "platform": None,
+    },
 ]
+
+# Flat list kept for the browser fetcher and the anti-block smoke tests.
+_USER_AGENTS = [p["ua"] for p in _UA_PROFILES]
 
 _ACCEPT_LANGUAGES = [
     "en-US,en;q=0.9",
     "en-GB,en;q=0.9,en-US;q=0.8",
     "en-US,en;q=0.9,uk;q=0.8",
+    "uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7",
     "en-US,en;q=0.8",
+]
+
+# Arriving "from a search" looks more organic than a cold direct hit and matches
+# how product/spec pages are normally reached.
+_REFERERS = [
+    "https://www.google.com/",
+    "https://www.bing.com/",
+    "https://duckduckgo.com/",
 ]
 
 # HTTP status codes that are worth retrying.
@@ -37,16 +77,32 @@ _RETRY_STATUSES = {429, 503, 502, 403}
 
 
 def _random_headers() -> dict[str, str]:
-    return {
-        "User-Agent": random.choice(_USER_AGENTS),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    profile = random.choice(_UA_PROFILES)
+    headers = {
+        "User-Agent": profile["ua"],
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,image/apng,*/*;q=0.8,"
+            "application/signed-exchange;v=b3;q=0.7"
+        ),
         "Accept-Language": random.choice(_ACCEPT_LANGUAGES),
-        # Note: omit "br" — brotli decompression requires the optional brotlicffi package.
+        # Omit "br" — brotli decompression needs the optional brotlicffi package.
         # httpx sets Accept-Encoding automatically when decompression is available.
         "Accept-Encoding": "gzip, deflate",
         "DNT": "1",
         "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "cross-site",
+        "Sec-Fetch-User": "?1",
+        "Referer": random.choice(_REFERERS),
     }
+    # Client Hints only for Chromium-family UAs, kept consistent with the UA.
+    if profile["ch_ua"]:
+        headers["Sec-CH-UA"] = profile["ch_ua"]
+        headers["Sec-CH-UA-Mobile"] = "?0"
+        headers["Sec-CH-UA-Platform"] = profile["platform"]
+    return headers
 
 
 def _pick_proxy() -> str | None:
