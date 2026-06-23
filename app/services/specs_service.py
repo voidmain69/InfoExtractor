@@ -4,6 +4,7 @@ import asyncio
 import logging
 from typing import Awaitable, Callable
 
+from app.core.config import settings
 from app.domain.page import FetchedPage, SearxNGResponse
 from app.domain.product import ProductQuery
 from app.domain.responses import SpecsResponse
@@ -21,7 +22,6 @@ logger = logging.getLogger(__name__)
 FetchPages = Callable[[list[str], dict[str, str]], Awaitable[list[FetchedPage]]]
 FetchWithJS = Callable[[str], Awaitable[str | None]]
 
-_PLAYWRIGHT_SCORE_THRESHOLD = 20
 _MERGE_TOP_N = 3  # merge specs from up to this many best pages
 
 
@@ -111,17 +111,37 @@ class SpecsService:
         else:
             best_score, best_url, best_groups = 0, None, []
 
-        # Playwright fallback when static extraction is sparse.
-        if best_score < _PLAYWRIGHT_SCORE_THRESHOLD and top_urls:
-            logger.info("/specs: sparse result (score=%d), trying Playwright on %s", best_score, top_urls[0])
-            js_html = await self._fetch_with_js(top_urls[0])
-            if js_html:
-                js_groups = extract_all_specs(js_html)
-                js_score = _specs_score(js_groups)
-                logger.info("/specs: playwright score=%d vs static score=%d", js_score, best_score)
-                if js_score > best_score:
-                    best_groups = merge_spec_groups([js_groups] + [g for _, _, g in scored[:_MERGE_TOP_N]])
-                    best_url = top_urls[0]
+        # Playwright fallback when static extraction is sparse. The headless
+        # browser reveals specs hidden behind tabs/accordions/"show more", so
+        # render the top few URLs (not just one) and merge whatever each yields.
+        if best_score < settings.playwright_score_threshold and top_urls:
+            js_urls = top_urls[: max(1, settings.playwright_max_urls)]
+            logger.info(
+                "/specs: sparse result (score=%d), trying Playwright on %d url(s): %s",
+                best_score, len(js_urls), js_urls,
+            )
+            js_htmls = await asyncio.gather(*[self._fetch_with_js(u) for u in js_urls])
+
+            js_scored: list[tuple[int, str, list[SpecGroup]]] = []
+            for url, html in zip(js_urls, js_htmls):
+                if not html:
+                    continue
+                groups = extract_all_specs(html)
+                score = _specs_score(groups)
+                if score > 0:
+                    js_scored.append((score, url, groups))
+            js_scored.sort(key=lambda x: x[0], reverse=True)
+
+            if js_scored and js_scored[0][0] > best_score:
+                logger.info(
+                    "/specs: best playwright score=%d vs static score=%d",
+                    js_scored[0][0], best_score,
+                )
+                # JS pages first (best wins on conflicts), then the static top.
+                best_groups = merge_spec_groups(
+                    [g for _, _, g in js_scored] + [g for _, _, g in scored[:_MERGE_TOP_N]]
+                )
+                best_url = js_scored[0][1]
 
         return SpecsResponse(
             product=product,

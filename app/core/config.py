@@ -20,6 +20,12 @@ class Settings(BaseSettings):
 
     use_playwright: bool = True
     playwright_timeout_seconds: float = 30.0
+    # /specs JS fallback: trigger a headless render whenever the best static
+    # score is below this (higher = lower barrier, Playwright runs more often),
+    # and render up to this many of the top URLs (not just one) to merge specs
+    # revealed behind tabs/accordions/"show more".
+    playwright_score_threshold: int = 25
+    playwright_max_urls: int = 2
 
     # Protects the single Ollama model server from concurrent batch requests.
     # 0 disables the limit.
