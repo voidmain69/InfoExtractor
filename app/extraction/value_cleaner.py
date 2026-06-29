@@ -30,6 +30,20 @@ _SIBLINGS: list[tuple[str, str]] = [
 
 _STOPWORDS = {"of", "the", "a", "type", "size"}
 
+# Boilerplate/footnote tail that marks the end of the real value and the start of
+# fine print or a glued-on next section. Everything from the marker on is dropped.
+_BLOB_TAIL_RE = re.compile(
+    r"\s*(?:"
+    r"https?://"          # links to support/download pages
+    r"|\bplease\s+refer\b"
+    r"|\bplease\s+visit\b"
+    r"|\bfor\s+more\s+information\b"
+    r"|\bsupported\s+memory\s+types\b"
+    r"|\*\s*\S"           # footnote asterisk ("...DIMM*  Supported...")
+    r").*$",
+    re.I | re.S,
+)
+
 
 def extract_unit(value: str) -> str | None:
     m = _UNIT_RE.search(value)
@@ -70,6 +84,13 @@ def _strip_attr_echo(value: str, attribute: str) -> str:
 def clean_value(value: str, attribute: str) -> tuple[str, str | None]:
     """Return (possibly-trimmed value, unit-or-None)."""
     cleaned = fix_text(value).strip()
+
+    # Cut a verbose-blob tail: keep only the first line, then drop fine print /
+    # glued-on next sections (footnotes, "please refer to…", support links). A
+    # spec table cell often concatenates the whole memory/IO section into one
+    # value; this keeps the head and removes the boilerplate that follows.
+    cleaned = cleaned.split("\n", 1)[0].strip()
+    cleaned = _BLOB_TAIL_RE.sub("", cleaned).strip(" ,;:-—–")
 
     attr_lower = attribute.lower()
     val_lower = cleaned.lower()

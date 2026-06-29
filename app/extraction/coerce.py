@@ -22,7 +22,8 @@ _UNITS: dict[str, tuple[str, float]] = {
     # time
     "ns": ("time", 1e-9), "us": ("time", 1e-6), "µs": ("time", 1e-6),
     "ms": ("time", 1e-3), "s": ("time", 1),
-    # length
+    # length (nm/µm added — used by lithography/optics specs)
+    "nm": ("len", 1e-9), "um": ("len", 1e-6), "µm": ("len", 1e-6),
     "mm": ("len", 1e-3), "cm": ("len", 1e-2), "m": ("len", 1),
     "inch": ("len", 0.0254), "in": ("len", 0.0254), '"': ("len", 0.0254),
     # mass
@@ -30,9 +31,26 @@ _UNITS: dict[str, tuple[str, float]] = {
     # power / electrical
     "w": ("power", 1), "kw": ("power", 1e3),
     "mv": ("volt", 1e-3), "v": ("volt", 1),
+    "ma": ("current", 1e-3), "a": ("current", 1),
+    # energy / charge (battery specs)
+    "wh": ("energy", 1), "kwh": ("energy", 1e3),
+    "mah": ("charge", 1), "ah": ("charge", 1e3),
+    # byte-rate vs bit-rate are DISTINCT dimensions — never auto-convert between
+    # them (they differ by a factor of 8); anchoring still picks the right figure.
+    "b/s": ("byterate", 1), "kb/s": ("byterate", 1e3),
+    "mb/s": ("byterate", 1e6), "gb/s": ("byterate", 1e9),
+    "bps": ("bitrate", 1), "kbps": ("bitrate", 1e3),
+    "mbps": ("bitrate", 1e6), "gbps": ("bitrate", 1e9),
+    "bit/s": ("bitrate", 1), "kbit/s": ("bitrate", 1e3),
+    "mbit/s": ("bitrate", 1e6), "gbit/s": ("bitrate", 1e9),
+    # luminance (1 nit = 1 cd/m²)
+    "nit": ("lum", 1), "nits": ("lum", 1), "cd/m2": ("lum", 1), "cd/m²": ("lum", 1),
 }
 
-_UNIT_ALIASES = {"inches": "inch", "hertz": "hz", "grams": "g", "kilograms": "kg"}
+_UNIT_ALIASES = {
+    "inches": "inch", "hertz": "hz", "grams": "g", "kilograms": "kg",
+    "amps": "a", "milliamps": "ma", "watts": "w",
+}
 
 _TRUE_TOKENS = {"yes", "true", "✓", "present", "supported", "available", "+", "є", "так", "да"}
 _FALSE_TOKENS = {"no", "false", "✗", "—", "absent", "unsupported", "n/a", "none", "немає", "нет", "ні"}
@@ -77,10 +95,13 @@ def coerce_number(raw: str, target_unit: str | None) -> NumberResult | None:
     tgt = _canon_unit(target_unit) if target_unit else None
     tgt_info = _UNITS.get(tgt) if tgt else None
 
-    # Collect (number, unit) pairs in order.
+    # Collect (number, unit) pairs in order. The unit group allows a "/sub" tail
+    # and trailing digits/superscripts so compound units survive: "MB/s",
+    # "Gbit/s", "cd/m2", "m²". Without this, the "/" truncated the unit (e.g.
+    # "MB/s" → "MB") and same-dimension anchoring picked the wrong number.
     pairs: list[tuple[float, str | None]] = []
     for m in re.finditer(
-        r"(-?\d+(?:[.,]\d+)?)\s*([a-zA-Zµ\"]+)?", raw
+        r"(-?\d+(?:[.,]\d+)?)\s*([a-zA-Zµ\"]+(?:/[a-zA-Zµ\"]+)?[0-9²³]*)?", raw
     ):
         num_s, unit_s = m.group(1), m.group(2)
         try:

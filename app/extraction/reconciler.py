@@ -13,6 +13,18 @@ METHOD_WEIGHTS: dict[ExtractionMethod, float] = {
     ExtractionMethod.LLM: 0.7,
 }
 
+# How much to trust a value backed by a SINGLE source, by the method that found
+# it. Structured extractors (a spec table, an infobox, JSON-LD) read declared
+# product data straight off the page, so one such source is reliable on its own.
+# A lone LLM read is the least certain, so it keeps a penalty. Corroboration by
+# multiple domains still adds a separate bonus on top.
+_SINGLE_SOURCE_FACTOR: dict[ExtractionMethod, float] = {
+    ExtractionMethod.INFOBOX: 1.0,
+    ExtractionMethod.CSS_SELECTOR: 1.0,
+    ExtractionMethod.JSONLD: 0.95,
+    ExtractionMethod.LLM: 0.85,
+}
+
 _FUZZY_GROUP_THRESHOLD = 0.72
 
 
@@ -88,7 +100,9 @@ def reconcile(
     if len(distinct_domains) >= 2:
         base_confidence = min(0.97, base_confidence * 1.15)
     else:
-        base_confidence *= 0.85
+        base_confidence *= _SINGLE_SOURCE_FACTOR.get(
+            best_candidate.source.extraction_method, 0.85
+        )
 
     all_sources = [c.source for c in candidates]
 

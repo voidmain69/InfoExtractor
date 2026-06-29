@@ -258,7 +258,7 @@ class ResolveService:
                 results[idx] = ResolvedAttribute(
                     name=spec.name, type=spec.type, value=value, unit=unit,
                     raw_value=raw.raw_value, matched_allowed=matched,
-                    confidence=round(raw.confidence * conf, 4),
+                    confidence=_match_boosted(round(raw.confidence * conf, 4), matched),
                     source_url=raw.source_url,
                     status=ResolveStatus.FOUND, sources=raw.sources,
                 )
@@ -280,6 +280,7 @@ class ResolveService:
                 status = ResolveStatus.NOT_FOUND
             else:
                 status = ResolveStatus.FOUND
+                final_conf = _match_boosted(final_conf, norm.matched_allowed)
 
             results[idx] = ResolvedAttribute(
                 name=spec.name, type=spec.type, value=norm.value,
@@ -346,6 +347,16 @@ def _not_found(spec: AttributeSpec) -> ResolvedAttribute:
     )
 
 
+def _match_boosted(conf: float, matched_allowed: bool | None) -> float:
+    """Lift confidence when a value snapped exactly onto a caller-supplied
+    allowed value. That agreement between the web value and the template's known
+    vocabulary is strong corroboration, so a confirmed enum should read as
+    reliable rather than sitting in the best-effort band."""
+    if matched_allowed:
+        return round(max(conf, 0.85), 4)
+    return conf
+
+
 def _coerce(
     spec: AttributeSpec, raw_value: str
 ) -> tuple[str, str | None, bool | None, float] | None:
@@ -376,6 +387,13 @@ def _coerce(
         return snapped, None, True, 0.9
     else:  # STRING
         value, unit = clean_value(raw_value, spec.name)
+        # A still-long string is usually an un-trimmed multi-spec blob, not a
+        # clean value — drop confidence so the UI flags it for review instead of
+        # presenting a paragraph as a reliable answer.
+        if value and len(value) > 120:
+            conf = min(conf, 0.4)
+        elif value and len(value) > 80:
+            conf = min(conf, 0.6)
 
     if value is None:
         return None
