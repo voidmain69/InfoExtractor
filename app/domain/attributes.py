@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from enum import Enum
+from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 from app.domain.extraction import SourceResult
 from app.domain.product import ProductQuery
@@ -22,16 +23,27 @@ class ResolveStatus(str, Enum):
     AMBIGUOUS = "ambiguous"
 
 
+# Bounded string aliases — keep request payloads (and the LLM prompts built from
+# them) from growing without limit, which would let one request fan out into an
+# unbounded number/size of Ollama calls (resource-exhaustion DoS).
+_ShortStr = Annotated[str, StringConstraints(max_length=120)]
+
+
 class AttributeSpec(BaseModel):
-    name: str
+    name: Annotated[str, StringConstraints(min_length=1, max_length=200)]
     type: AttrType = AttrType.STRING
-    unit: str | None = None                       # desired output unit
-    allowed_values: list[str] | None = None       # candidate set to snap to
+    unit: _ShortStr | None = None                 # desired output unit
+    # candidate set to snap to — bounded in count and per-item length so an
+    # attacker can't blow up the normalizer prompt with a huge allowed list.
+    allowed_values: list[_ShortStr] | None = Field(default=None, max_length=200)
 
 
 class ResolveRequest(BaseModel):
     product: ProductQuery
-    attributes: list[AttributeSpec] = Field(min_length=1)
+    # Upper bound caps the per-request fan-out: each attribute can trigger search
+    # + fetch + LLM work, so an unbounded list is a DoS vector. Callers that need
+    # more should chunk (the catalog admin already sends ≤8 per request).
+    attributes: list[AttributeSpec] = Field(min_length=1, max_length=100)
     official_only: bool = False
     max_sources: int = Field(default=5, ge=1, le=10)
 

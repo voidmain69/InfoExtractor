@@ -1,9 +1,36 @@
 services:
   getattrservice:
     build: .
+    # Bind to loopback only — the service must sit behind a reverse proxy / the
+    # app network, never be reachable on every host interface. Set API_KEY before
+    # exposing it beyond localhost.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     env_file: .env
+    # ── Containment: limit the blast radius of a compromised renderer ──────────
+    # Chromium runs with --no-sandbox, so we compensate at the container level so
+    # a hostile page that exploits the renderer can't tamper with the host, gain
+    # new privileges, or drop persistent malware.
+    read_only: true                 # immutable root fs — no malware can be written
+    security_opt:
+      - no-new-privileges:true      # block setuid/privilege escalation
+    cap_drop:
+      - ALL                         # drop every Linux capability
+    pids_limit: 512                 # bound process fan-out (Chromium spawns many)
+    mem_limit: 2g
+    cpus: "2.0"
+    # Writable scratch only where the runtime genuinely needs it (Chromium temp /
+    # crashpad). noexec/nosuid prevent executing dropped payloads from tmpfs.
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=512m
+      - /home/appuser/.cache:rw,noexec,nosuid,size=128m
+    environment:
+      # Keep local SearxNG/Ollama calls (host.docker.internal) off the corporate
+      # proxy that the Docker daemon auto-injects; outbound web fetches still use
+      # PROXY_LIST. Set here (not in .env) because pydantic Settings forbids
+      # unknown keys in the .env file.
+      NO_PROXY: "localhost,127.0.0.1,host.docker.internal,.local.erc,.bs.local.erc"
+      no_proxy: "localhost,127.0.0.1,host.docker.internal,.local.erc,.bs.local.erc"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

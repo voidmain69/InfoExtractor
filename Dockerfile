@@ -12,10 +12,13 @@ COPY requirements.txt .
 # a hostile page that exploits the renderer — important because Chromium still
 # runs with --no-sandbox (the in-container sandbox needs privileges we don't
 # grant). Pair this image with a seccomp profile / read-only rootfs in prod.
-RUN pip install --no-cache-dir -r requirements.txt \
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir -r requirements.txt \
     && playwright install --with-deps chromium \
     && useradd --create-home --uid 10001 appuser \
-    && chown -R appuser:appuser /ms-playwright
+    && chown -R appuser:appuser /ms-playwright \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache
 
 COPY . .
 RUN chown -R appuser:appuser /app
