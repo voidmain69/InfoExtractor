@@ -14,17 +14,60 @@ transparently covers names like ``host.docker.internal`` and
 Residual risk: DNS rebinding between this check and the actual connection. For
 the search-result/redirect threat model this validation is a proportionate
 mitigation; a fully airtight fix would pin the validated IP for the connection.
+
+Proxy-only egress: when all outbound traffic is forced through an HTTP proxy,
+the proxy — not this process — performs name resolution, and local DNS for
+external names is typically unavailable. In that mode ``getaddrinfo`` fails for
+every public host, so resolving-then-checking would block everything. We instead
+keep the two checks that need no DNS — non-global IP *literals* (e.g.
+``169.254.169.254``) and internal-looking hostnames (no dot, or an internal
+suffix like ``.internal``/``.local``/``.localhost``) are still rejected — and
+otherwise defer to the proxy boundary for egress. When a proxy is *not*
+configured, behaviour is unchanged: hosts are resolved and fail closed.
 """
 from __future__ import annotations
 
 import asyncio
 import ipaddress
 import logging
+import os
 from urllib.parse import urlparse
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 _ALLOWED_SCHEMES = {"http", "https"}
+
+# Hostname suffixes / names that always denote a non-public target, checked
+# without DNS so the proxy-only path still blocks the documented SSRF names.
+_INTERNAL_SUFFIXES = (".internal", ".local", ".localhost", ".lan", ".intranet")
+_INTERNAL_NAMES = {"localhost", "host.docker.internal", "metadata.google.internal"}
+
+
+def _proxy_configured() -> bool:
+    """True if outbound fetches are forced through an HTTP proxy."""
+    if settings.proxy_list.strip():
+        return True
+    return any(
+        os.environ.get(var)
+        for var in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
+    )
+
+
+def _host_is_internal_name(host: str) -> bool:
+    """Reject internal-looking hostnames using string rules only (no DNS)."""
+    h = host.strip(".").lower()
+    if not h:
+        return True
+    if h in _INTERNAL_NAMES:
+        return True
+    if any(h == s.lstrip(".") or h.endswith(s) for s in _INTERNAL_SUFFIXES):
+        return True
+    # A bare single-label hostname (no dot) can only be an internal/short name.
+    if "." not in h:
+        return True
+    return False
 
 
 def _ip_blocked(ip_str: str) -> bool:
@@ -41,26 +84,12 @@ def _ip_blocked(ip_str: str) -> bool:
     return not ip.is_global
 
 
-async def _host_is_public(host: str) -> bool:
-    loop = asyncio.get_event_loop()
-    try:
-        infos = await loop.getaddrinfo(host, None)
-    except Exception as exc:
-        logger.debug("DNS resolution failed for %s: %s", host, exc)
-        return False
-    if not infos:
-        return False
-    # Every resolved address must be public — a single internal answer is enough
-    # to abuse, so reject the host if any record is blocked.
-    for info in infos:
-        ip = info[4][0]
-        if _ip_blocked(ip):
-            return False
-    return True
-
-
 async def is_safe_url(url: str) -> bool:
-    """Return True only for http(s) URLs whose host resolves to public IPs."""
+    """Return True only for http(s) URLs whose host resolves to public IPs.
+
+    Under proxy-only egress (no local DNS), fall back to literal/name checks
+    that need no resolution and defer the rest to the proxy boundary.
+    """
     try:
         parsed = urlparse(url)
     except Exception:
@@ -70,4 +99,34 @@ async def is_safe_url(url: str) -> bool:
     host = parsed.hostname
     if not host:
         return False
-    return await _host_is_public(host)
+
+    # IP literal: always check directly — no DNS needed, blocks metadata/internal IPs.
+    try:
+        ipaddress.ip_address(host)
+        return not _ip_blocked(host)
+    except ValueError:
+        pass  # not a literal → it's a hostname
+
+    # Internal-looking names are rejected regardless of egress mode.
+    if _host_is_internal_name(host):
+        return False
+
+    # Try to resolve and apply the full public-IP check.
+    loop = asyncio.get_event_loop()
+    try:
+        infos = await loop.getaddrinfo(host, None)
+    except Exception as exc:
+        # No local DNS. If a proxy mediates egress (and does its own resolution),
+        # the local resolver's blindness isn't a safety signal — allow the host;
+        # the literal/internal-name checks above still apply. Otherwise fail closed.
+        if _proxy_configured():
+            logger.debug("DNS unavailable for %s; allowing via proxy egress", host)
+            return True
+        logger.debug("DNS resolution failed for %s: %s", host, exc)
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        if _ip_blocked(info[4][0]):
+            return False
+    return True
