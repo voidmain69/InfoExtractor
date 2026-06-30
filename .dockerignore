@@ -1,0 +1,11 @@
+# Don't bake local config/secrets or VCS metadata into the image.
+# .env is injected at runtime via docker-compose `env_file:` instead — baking it
+# also breaks pydantic Settings, which forbids unknown keys (e.g. NO_PROXY).
+.env
+.git
+.gitignore
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/

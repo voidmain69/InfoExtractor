@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Awaitable, Callable
+from urllib.parse import urljoin, urlparse
+
+from bs4 import BeautifulSoup
 
 from app.core.config import settings
 from app.domain.page import FetchedPage, SearxNGResponse
@@ -23,6 +26,58 @@ FetchPages = Callable[[list[str], dict[str, str]], Awaitable[list[FetchedPage]]]
 FetchWithJS = Callable[[str], Awaitable[str | None]]
 
 _MERGE_TOP_N = 3  # merge specs from up to this many best pages
+_MAX_SPEC_LINKS = 2  # follow at most this many discovered spec sub-pages
+
+# Anchor-text markers (multi-language, vendor-agnostic) of a link that leads to a
+# dedicated specification page. Matched against the LINK TEXT — not the href — so
+# we jump to the real spec table rather than a marketing landing, without
+# hardcoding any site. `_SPEC_LINK_NEG` text rules out look-alikes.
+_SPEC_LINK_KEYWORDS = (
+    "technical specifications", "full specifications", "specifications", "specification",
+    "tech specs", "tech spec", "techspec", "specs", "spec sheet", "datasheet", "data sheet",
+    "технічні характеристики", "технические характеристики", "характеристики", "характеристика",
+    "специфікації", "спецификации", "параметри", "параметры",
+)
+_SPEC_LINK_NEG = (
+    "support", "download", "driver", "manual", "warranty", "review", "faq",
+    "where to buy", "buy", "community", "news", "blog", "compare",
+)
+
+
+def _find_spec_links(html: str, base_url: str, limit: int = _MAX_SPEC_LINKS) -> list[str]:
+    """Same-site links whose anchor text names a specification page. Returns
+    absolute URLs (best match first), excluding the page itself. Vendor-agnostic:
+    keyed on link wording, so it works for any site that splits specs onto a
+    dedicated tab/sub-page."""
+    if not html:
+        return []
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        soup = BeautifulSoup(html, "html.parser")
+
+    base = urlparse(base_url)
+    base_norm = base_url.split("#")[0].rstrip("/")
+    scored: dict[str, int] = {}
+    for a in soup.find_all("a", href=True):
+        text = " ".join((a.get_text(" ", strip=True) or "").split()).lower()
+        if not text or any(n in text for n in _SPEC_LINK_NEG):
+            continue
+        hits = [k for k in _SPEC_LINK_KEYWORDS if k in text]
+        if not hits:
+            continue
+        href = a["href"].strip()
+        if not href or href.lower().startswith(("javascript:", "mailto:", "tel:")):
+            continue
+        absu = urljoin(base_url, href)
+        pu = urlparse(absu)
+        if pu.scheme not in ("http", "https") or (pu.hostname or "") != (base.hostname or ""):
+            continue
+        norm = absu.split("#")[0]
+        if norm.rstrip("/") == base_norm:
+            continue
+        scored[norm] = max(scored.get(norm, 0), max(len(k) for k in hits))  # prefer most specific wording
+    return [u for u, _ in sorted(scored.items(), key=lambda x: x[1], reverse=True)[:limit]]
 
 
 class SpecsNotFound(Exception):
@@ -145,6 +200,61 @@ class SpecsService:
 
         return SpecsResponse(
             product=product,
+            groups=best_groups,
+            source_url=best_url,
+            total_specs=sum(len(g.specs) for g in best_groups),
+        )
+
+    async def _extract_best(self, target: str) -> tuple[int, list[SpecGroup], str | None]:
+        """Best static-or-Playwright spec extraction for one URL. Returns
+        (score, groups, html_used) — html is the markup the winning result came
+        from (rendered when JS was needed), used for spec-link discovery."""
+        pages = await self._fetch_pages([target], {target: ""})
+        html = pages[0].html if pages else None
+        groups = extract_all_specs(html) if html else []
+        score = _specs_score(groups)
+
+        if score < settings.playwright_score_threshold:
+            js_html = await self._fetch_with_js(target)
+            if js_html:
+                js_groups = extract_all_specs(js_html)
+                if _specs_score(js_groups) > score:
+                    groups, score, html = js_groups, _specs_score(js_groups), js_html
+        return score, groups, html
+
+    async def get_specs_from_url(self, url: str) -> SpecsResponse:
+        """Extract specs from a single operator-supplied product-page URL.
+
+        Bypasses search: fetch the page (validated by the same SSRF guard),
+        extract statically with a Playwright fallback, and — universally, for any
+        vendor — if the page links to a dedicated *specification* sub-page (matched
+        by anchor wording), follow it. A real spec page beats a marketing landing,
+        so a credible spec sub-page wins over the originally-supplied page."""
+        primary_score, primary_groups, primary_html = await self._extract_best(url)
+
+        # Universal "landing → spec page": prefer a dedicated specification
+        # sub-page when one is linked and yields a credible result. Comparing raw
+        # scores alone is unsafe (a content-heavy marketing page can out-count a
+        # spec table), so an explicitly spec-labelled page is trusted on its own.
+        spec_score, spec_groups, spec_url = 0, [], None
+        for link in _find_spec_links(primary_html or "", url):
+            s, g, _ = await self._extract_best(link)
+            if g and s >= settings.playwright_score_threshold and s > spec_score:
+                spec_score, spec_groups, spec_url = s, g, link
+
+        if spec_groups:
+            logger.info(
+                "/specs/from-url: using spec page %s (score=%d) over %s (score=%d)",
+                spec_url, spec_score, url, primary_score,
+            )
+            best_groups, best_url = spec_groups, spec_url
+        elif primary_groups:
+            best_groups, best_url = primary_groups, url
+        else:
+            raise SpecsNotFound(f"No specs extracted from {url}")
+
+        return SpecsResponse(
+            product=ProductQuery(name=(best_url or url)[:300]),
             groups=best_groups,
             source_url=best_url,
             total_specs=sum(len(g.specs) for g in best_groups),

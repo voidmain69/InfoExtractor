@@ -1,16 +1,22 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
+from typing import Annotated
+
+from pydantic import BaseModel, StringConstraints
+
+# Bounded identity strings — these flow into search queries and LLM prompts, so
+# unbounded sizes would be a resource-exhaustion vector.
+_Str = Annotated[str, StringConstraints(max_length=300)]
 
 
 class ProductQuery(BaseModel):
-    name: str
-    category: str | None = None
-    brand: str | None = None
-    article: str | None = None
-    mpn: str | None = None
-    ean13: str | None = None
-    upc: str | None = None
+    name: Annotated[str, StringConstraints(min_length=1, max_length=300)]
+    category: _Str | None = None
+    brand: _Str | None = None
+    article: _Str | None = None
+    mpn: _Str | None = None
+    ean13: _Str | None = None
+    upc: _Str | None = None
 
     def search_string(self) -> str:
         """Compact string for search queries: brand + name + article/mpn."""

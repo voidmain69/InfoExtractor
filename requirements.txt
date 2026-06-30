@@ -1,14 +1,15 @@
-fastapi==0.115.0
+fastapi==0.138.1   # 0.115.0 → 0.138.1: allows the patched starlette 1.x line
+# starlette pinned to a release that clears all known advisories (PYSEC-2026-161/
+# 248/249, CVE-2025-54121/62727, CVE-2026-48817/48818, CVE-2024-47874).
+starlette==1.3.1
 uvicorn[standard]==0.32.0
 httpx==0.27.2
 brotlicffi==1.1.0.0
 beautifulsoup4==4.12.3
 ftfy==6.2.0
-lxml==5.3.0
+lxml==6.1.0          # 5.3.0 → 6.1.0: fixes PYSEC-2026-87 (libxml2 parser)
 pydantic==2.10.0
 pydantic-settings==2.6.0
 cachetools==5.5.0
-python-dotenv==1.0.1
+python-dotenv==1.2.2  # 1.0.1 → 1.2.2: fixes CVE-2026-28684
 playwright==1.45.0
-pytest==8.3.0
-pytest-asyncio==0.24.0
