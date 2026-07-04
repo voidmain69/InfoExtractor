@@ -32,10 +32,12 @@ class OllamaGateway:
         base_url: str,
         model: str,
         max_concurrency: int = 0,
+        keep_alive: str | None = None,
     ):
         self._client = client
         self._base_url = base_url.rstrip("/")
         self._model = model
+        self._keep_alive = keep_alive
         # Bound concurrent calls to protect a single shared model server.
         self._sem = asyncio.Semaphore(max_concurrency) if max_concurrency > 0 else None
         self._consecutive_failures = 0
@@ -50,6 +52,7 @@ class OllamaGateway:
                 {"role": "user", "content": user},
             ],
             "stream": False,
+            **({"keep_alive": self._keep_alive} if self._keep_alive else {}),
         }
         return await asyncio.wait_for(self._post(payload, timeout), timeout=timeout)
 
@@ -58,6 +61,16 @@ class OllamaGateway:
         content = await self.chat(system, user, timeout=timeout)
         content = _strip_code_fences(content)
         return json.loads(content)
+
+    async def warmup(self, timeout: float = 300.0) -> None:
+        """Pre-load the model with a trivial call so per-request stage timeouts
+        (6–60s) never have to absorb a multi-minute cold load; combined with
+        keep_alive the model then stays resident. Never raises."""
+        try:
+            await self.chat("You are a warmup probe.", "Reply with: ok", timeout=timeout)
+            logger.info("Ollama model %s warmed up", self._model)
+        except Exception as exc:
+            logger.warning("Ollama warmup failed: %s", exc)
 
     @property
     def available(self) -> bool:

@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 import httpx
@@ -32,7 +33,11 @@ async def lifespan(app: FastAPI):
     ollama = OllamaGateway(
         client, settings.ollama_url, settings.ollama_model,
         max_concurrency=settings.ollama_max_concurrency,
+        keep_alive=settings.ollama_keep_alive,
     )
+    # Fire-and-forget: pull the model into memory now, not inside the first
+    # request's 6–30s stage budgets (a CPU-only host cold-loads for minutes).
+    warmup_task = asyncio.create_task(ollama.warmup())
     searxng = SearxNGClient(client, settings.searxng_url)
     query_builder = QueryBuilder(ollama)
     official_site = OfficialSiteResolver(ollama, searxng)
@@ -56,6 +61,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        warmup_task.cancel()
         await client.aclose()
 
 

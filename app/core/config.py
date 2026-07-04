@@ -7,6 +7,11 @@ class Settings(BaseSettings):
     searxng_url: str = "http://localhost:8080"
     ollama_url: str = "http://localhost:11434"
     ollama_model: str = "gemma3:4b"
+    # How long Ollama keeps the model resident after a call (Ollama's own
+    # default is a mere 5m). On a CPU-only host a cold load takes minutes —
+    # longer than every per-stage timeout — so an evicted model turns the first
+    # request after an idle gap into a silent all-stages-degraded one.
+    ollama_keep_alive: str = "2h"
 
     cache_ttl_seconds: int = 3600
     cache_max_size: int = 2000
