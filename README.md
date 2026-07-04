@@ -8,7 +8,9 @@ The service is built to stay reliable against real-world web friction:
 
 - **Anti-blocking fetcher** — rotating browser profiles where the User-Agent, `Sec-CH-UA` Client Hints and `Sec-Fetch-*`/`Referer` headers stay mutually consistent (so cross-checks don't flag the request), rotating `Accept-Language`, exponential-backoff retries on `429/503/403`, request jitter, optional proxy rotation, and a stealth-patched headless Chromium.
 - **Anti-throttle search** — diversified SearxNG engine set, an in-process search-response cache, and an outbound rate limiter so a batch request can't burst the upstream engines into CAPTCHA.
-- **High-quality extraction** — mojibake repair (UTF-8 served as cp1252), deterministic type coercion + unit conversion, a curated synonym/translation matcher, and verbose-blob trimming, so values come back clean and correctly typed without leaning on the LLM for the easy cases.
+- **Source-quality ranking** — a curated brand → official-domain table (used for ranking boosts, `site:` queries and official-site resolution without any LLM call), bonuses for spec-rich aggregators, penalties for junk domains and support/download sections, UA/EN locale preference on multi-locale manufacturer sites, and skipping of binary URLs.
+- **High-quality extraction** — five independent extractors merged per page (site-specific selectors, JSON-LD `additionalProperty`, embedded JSON state from `__NEXT_DATA__`-style scripts, spec-scored tables/dl/li/div pairs incl. class-hinted `spec-name`/`spec-value` rows and `Label: value` text lines), mojibake repair, deterministic type coercion + multilingual unit conversion (`об/хв`→rpm, `кВт`→W, `мл`→l, ranges `20-145 бар`→145, thousands separators), unit hints carried from row labels (`Потужність (кВт)` + `2,1`), dimension-blob splitting (`Габарити (ШхВхГ)` answers `Ширина`), qualified-segment selection (`55 прання | 73 віджимання` answers the spin-noise attribute), and a curated multilingual synonym matcher — so values come back clean and correctly typed without leaning on the LLM for the easy cases.
+- **LLM circuit breaker** — when the Ollama host is unreachable, calls fast-fail for a cooldown window instead of stalling every request; all LLM stages degrade to deterministic fallbacks.
 
 ---
 
@@ -81,19 +83,33 @@ search:
     - json
 ```
 
-For resilience against per-host throttling, configure a **diverse engine set** rather than relying on the CAPTCHA-prone defaults. On a datacenter IP, Google/DuckDuckGo/Startpage CAPTCHA quickly; Bing and Brave are reliable, with Mojeek/Qwant/Wikipedia as independents:
+For resilience against per-host throttling, configure a **diverse engine set** rather than relying on the CAPTCHA-prone defaults. On a datacenter IP, Google/DuckDuckGo/Startpage CAPTCHA quickly; Bing, Presearch and Yep are reliable, with Mojeek/Brave/Wikipedia as independents.
+
+> **Critical:** most of these engines are `disabled: true` in SearxNG's *default* settings, and a merged `engines:` entry inherits that unless you say `disabled: false` explicitly. Without the flag only the CAPTCHA-prone defaults actually serve queries — one blocked burst then blinds the whole instance (every query returns `[]` while bing & co sit idle). Also shorten `suspended_times`: the default suspends a CAPTCHA'd engine for a full day.
+
 ```yaml
+search:
+  suspended_times:            # defaults suspend for a day — far too long
+    SearxEngineAccessDenied: 1800
+    SearxEngineCaptcha: 1800
+    SearxEngineTooManyRequests: 900
 outgoing:
   retries: 0          # don't re-hit a blocked engine; rely on diversity
 engines:
-  - { name: bing,       engine: bing,       shortcut: b,  timeout: 5.0 }
-  - { name: brave,      engine: brave,      shortcut: br, timeout: 5.0 }
-  - { name: mojeek,     engine: mojeek,     shortcut: mj, timeout: 5.0 }
-  - { name: qwant,      engine: qwant,      shortcut: qw, timeout: 5.0 }
-  - { name: duckduckgo, engine: duckduckgo, shortcut: d,  timeout: 5.0 }
-  - { name: google,     engine: google,     shortcut: g,  timeout: 5.0 }
-  - { name: wikipedia,  engine: wikipedia,  shortcut: wp, timeout: 4.0 }
+  - { name: bing,       engine: bing,       shortcut: b,  timeout: 5.0, disabled: false }
+  - { name: brave,      engine: brave,      shortcut: br, timeout: 5.0, disabled: false }
+  - { name: mojeek,     engine: mojeek,     shortcut: mj, timeout: 5.0, disabled: false }
+  - { name: qwant,      engine: qwant,      shortcut: qw, timeout: 5.0, disabled: false }
+  - { name: duckduckgo, engine: duckduckgo, shortcut: d,  timeout: 5.0, disabled: false }
+  - { name: google,     engine: google,     shortcut: g,  timeout: 5.0, disabled: false }
+  - { name: wikipedia,  engine: wikipedia,  shortcut: wp, timeout: 4.0, disabled: false }
+  - { name: startpage,  engine: startpage,  shortcut: sp, timeout: 6.0, disabled: false }
+  - { name: presearch,  engine: presearch,  shortcut: ps, timeout: 6.0, disabled: false }
+  - { name: yep,        engine: yep,        shortcut: yep, timeout: 6.0, disabled: false }
+  - { name: seznam,     engine: seznam,     shortcut: sz, timeout: 6.0, disabled: false }
 ```
+
+(The `yahoo` engine was tried and dropped — it consistently fails with "HTTP protocol error" in SearxNG 2026.6.11. CJK/KR engines like baidu/sogou/naver add nothing for EN/UA product queries.)
 
 ---
 
@@ -120,13 +136,13 @@ curl http://localhost:8000/health
 
 | Variable | Default | Description |
 |---|---|---|
-| `SEARXNG_URL` | `http://localhost:8080` | SearxNG base URL. Use `http://host.docker.internal:8080` when SearxNG runs on the Docker host. |
+| `SEARXNG_URL` | `http://localhost:8080` | SearxNG base URL. Prefer joining SearxNG's docker network and using `http://searxng:8080` (see `docker-compose.yml`) — on Windows hosts, IIS/`http.sys` can shadow a published host port and answer 401 in SearxNG's place. |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama base URL. |
 | `OLLAMA_MODEL` | `gemma3:4b` | Model name as it appears in Ollama (e.g. `gemma4:e4b`, `llama3:8b`). |
 | `CACHE_TTL_SECONDS` | `3600` | How long a cached result is kept (seconds). |
 | `CACHE_MAX_SIZE` | `2000` | Maximum number of cached entries (LRU). |
 | `MAX_CONCURRENT_FETCHES` | `5` | Maximum parallel page fetches per request. |
-| `PAGE_FETCH_TIMEOUT_SECONDS` | `8.0` | Per-page HTTP timeout. |
+| `PAGE_FETCH_TIMEOUT_SECONDS` | `12.0` | Per-page HTTP timeout (heavy manufacturer pages need the headroom). |
 | `MAX_SOURCES` | `5` | Maximum pages fetched per `/attribute` request. |
 | `QUERY_BUILDER_TIMEOUT_SECONDS` | `6.0` | Timeout for Ollama query generation. |
 | `LLM_EXTRACTION_TIMEOUT_SECONDS` | `60.0` | Timeout for Ollama spec extraction per page. |
@@ -160,8 +176,9 @@ curl http://localhost:8000/health
 | `RESOLVE_MAX_CONCURRENCY` | `4` | Max attributes resolved in parallel within one `POST /attributes` request. |
 | `RESOLVE_TARGETED_FALLBACK` | `true` | Allow a cheap per-attribute web search when the shared pool lacks the attribute. |
 | `RESOLVE_MATCH_THRESHOLD` | `0.78` | Fuzzy threshold for matching an attribute name to a spec-pool label. |
-| `RESOLVE_POOL_MAX_PAGES` | `3` | Cap the shared spec pool to the top-N most relevant pages (drops vendor-list/download noise). |
+| `RESOLVE_POOL_MAX_PAGES` | `3` | Cap the shared spec pool to the top-N *productive* pages (pages yielding no specs don't count against the cap). |
 | `RESOLVE_POOL_RICH_THRESHOLD` | `40` | If the pool has at least this many specs, skip the per-attribute web fallback (avoids self-throttling). |
+| `RESOLVE_POOL_JS_THRESHOLD` | `30` | If the static pool has fewer specs than this, JS-render the top URLs with Playwright and merge what the browser reveals (client-rendered manufacturer pages, "show all" tables). |
 | `NORMALIZE_TIMEOUT_SECONDS` | `30.0` | Timeout for the batched Ollama normalization / semantic-match calls. |
 
 **Anti-blocking (page fetcher):**
@@ -529,3 +546,19 @@ getAttrService/
 ```
 
 All Ollama interaction goes through the single `OllamaGateway` (`app/infrastructure/llm/ollama.py`); the shared `httpx.AsyncClient` for Ollama + SearxNG is created once in `main.py`'s lifespan and closed on shutdown.
+
+---
+
+## Quality benchmark
+
+`benchmark_quality.py` measures the whole chain end-to-end against a running instance: 11 real products across 11 vendors (Bosch, Beko, LG, 2E, Gigabyte, Karcher, Braun, Philips, Brother, Tefal, Ariston) and ~40 attributes with deliberately awkward taxonomy names (uk/en mix, inexact wording) and units that differ from the source pages (`см`↔`mm`, `кВт`↔`W`, `мл`↔`l`, `об/хв`↔`rpm`).
+
+```bash
+# full run (inside the container or with the service on localhost:8000)
+python benchmark_quality.py --json results.json
+
+# single product while iterating
+python benchmark_quality.py --only bosch
+```
+
+Each attribute is judged by a tolerance-aware checker (numeric ±2%, enum/string containment), and the summary reports the correct-value percentage — re-run it after any extraction change. `test_quality.py` covers the deterministic units (coercion, mojibake repair, synonyms) without network access.
