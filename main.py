@@ -50,7 +50,7 @@ async def lifespan(app: FastAPI):
     )
     app.state.resolve_service = ResolveService(
         searxng, query_builder, official_site, pipeline, normalizer,
-        semantic_matcher, cache, fetch_pages
+        semantic_matcher, cache, fetch_pages, fetch_with_js
     )
 
     try:

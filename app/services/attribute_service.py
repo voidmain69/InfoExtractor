@@ -4,6 +4,8 @@ import asyncio
 import logging
 from typing import Awaitable, Callable
 
+from app.core.config import settings
+from app.domain.brand_domains import official_domains
 from app.domain.extraction import ExtractionCandidate
 from app.domain.page import FetchedPage, SearxNGResponse
 from app.domain.product import ProductQuery
@@ -15,6 +17,7 @@ from app.infrastructure.cache.ttl_cache import TTLCacheStore, make_key
 from app.infrastructure.fetch.http_fetcher import build_page
 from app.infrastructure.query.query_builder import QueryBuilder
 from app.infrastructure.search.searxng import SearxNGClient
+from app.services.attribute_matcher import pool_candidates
 from app.services.official_site import OfficialSiteResolver
 from app.services.product_match import MATCH_FLOOR, match_score
 from app.services.source_ranking import rank_sources
@@ -82,7 +85,12 @@ class AttributeService:
 
         responses = await self._search_all(queries)
         merged_infoboxes, merged_answers = _merge_boxes(responses)
-        ranked = rank_sources(responses, official_domain if official_only else None)
+        ranked = rank_sources(
+            responses,
+            official_domain if official_only else None,
+            brand_domains=official_domains(product.brand),
+            model_hints=[h for h in (product.name, product.article, product.mpn) if h],
+        )
 
         # Restrict to official domain (with graceful fallback to a normal search).
         if official_only and official_domain:
@@ -96,7 +104,7 @@ class AttributeService:
                 queries = await self._query_builder.build_queries(product, attribute, official_domain=None)
                 responses = await self._search_all(queries)
                 merged_infoboxes, merged_answers = _merge_boxes(responses)
-                ranked = rank_sources(responses, None)
+                ranked = rank_sources(responses, None, brand_domains=official_domains(product.brand))
 
         if not ranked:
             raise AttributeNotFound("No search results found")
@@ -115,6 +123,9 @@ class AttributeService:
         kept = _keep_relevant(pages, weights)
 
         candidates = await self._pipeline.run(product, attribute, merged_response, kept)
+        # Pool stage: spec tables + embedded-JSON state the CSS/JSON-LD
+        # extractors can't see (same machinery the batch resolver uses).
+        candidates += pool_candidates(attribute, kept, settings.resolve_match_threshold)
         candidates = _apply_weights(candidates, weights)
         value, unit, confidence, sources = reconcile(candidates)
 
@@ -167,6 +178,7 @@ class AttributeService:
 
         js_page = build_page(page.url, page.title, js_html)
         js_candidates = await self._pipeline.run(product, attribute, merged_response, [js_page])
+        js_candidates += pool_candidates(attribute, [js_page], settings.resolve_match_threshold)
         js_candidates = _apply_weights(js_candidates, {page.url: match_score(product, js_page)})
 
         combined = prior_candidates + js_candidates

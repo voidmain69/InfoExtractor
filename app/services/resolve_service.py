@@ -21,17 +21,20 @@ from app.extraction.coerce import (
 )
 from app.extraction.pipeline import ExtractionPipeline
 from app.extraction.reconciler import reconcile
-from app.extraction.value_cleaner import clean_value
+from app.extraction.value_cleaner import clean_value, select_segment
 from app.infrastructure.cache.ttl_cache import TTLCacheStore, make_key
+from app.infrastructure.fetch.http_fetcher import build_page
 from app.infrastructure.query.query_builder import QueryBuilder
 from app.infrastructure.search.searxng import SearxNGClient
 from app.services.attribute_matcher import (
     PooledSpec,
-    build_spec_pool,
     candidates_for_label,
+    dimension_candidates,
     match_in_pool,
+    page_pool,
     pool_labels,
 )
+from app.domain.brand_domains import official_domains
 from app.services.official_site import OfficialSiteResolver
 from app.services.product_match import keep_relevant
 from app.services.semantic_matcher import SemanticMatcher
@@ -43,6 +46,7 @@ from app.services.value_normalizer import NormItem, ValueNormalizer
 logger = logging.getLogger(__name__)
 
 FetchPages = Callable[[list[str], dict[str, str]], Awaitable[list[FetchedPage]]]
+FetchWithJS = Callable[[str], Awaitable[str | None]]
 
 
 @dataclass
@@ -50,6 +54,7 @@ class _Pool:
     pages: list[FetchedPage]
     merged: SearxNGResponse
     specs: list[PooledSpec]
+    productive_pages: int = 0
 
 
 @dataclass
@@ -71,6 +76,7 @@ class ResolveService:
         semantic_matcher: SemanticMatcher,
         cache: TTLCacheStore,
         fetch_pages: FetchPages,
+        fetch_with_js: FetchWithJS | None = None,
     ):
         self._searxng = searxng
         self._query_builder = query_builder
@@ -80,6 +86,7 @@ class ResolveService:
         self._semantic_matcher = semantic_matcher
         self._cache = cache
         self._fetch_pages = fetch_pages
+        self._fetch_with_js = fetch_with_js
         self._sem = asyncio.Semaphore(max(1, settings.resolve_max_concurrency))
 
     async def resolve(
@@ -151,8 +158,13 @@ class ResolveService:
             product, official_domain=official_domain
         )
         logger.info("/attributes queries: %s", queries)
-        responses = await asyncio.gather(*[self._searxng.search(q, num_results=8) for q in queries])
-        ranked = rank_sources(responses, official_domain if official_only else None)
+        responses = await asyncio.gather(*[self._searxng.search(q, num_results=10) for q in queries])
+        ranked = rank_sources(
+            responses,
+            official_domain if official_only else None,
+            brand_domains=official_domains(product.brand),
+            model_hints=_model_hints(product),
+        )
         if official_only and official_domain:
             filtered = [(u, t) for u, t in ranked if url_matches_domain(u, official_domain)]
             if filtered:
@@ -164,11 +176,51 @@ class ResolveService:
         pages = await self._fetch_pages(top_urls, titles) if top_urls else []
         logger.info("/attributes fetched %d pages, statuses: %s",
                     len(pages), [(p.url.split("/")[2], p.status_code) for p in pages])
-        pages = keep_relevant(product, pages, top_n=settings.resolve_pool_max_pages)
+        pages = keep_relevant(product, pages)
         logger.info("/attributes keep_relevant kept %d pages", len(pages))
 
-        pool_entries = build_spec_pool(pages)
-        logger.info("/attributes spec pool: %d entries", len(pool_entries))
+        # Build the pool from relevance-ordered pages, but count only pages
+        # that actually yield specs toward the page cap — a support page or a
+        # JS shell shouldn't crowd out the retail page with the real table.
+        pool_entries: list[PooledSpec] = []
+        kept_pages: list[FetchedPage] = []
+        productive = 0
+        for page in pages:
+            entries = page_pool(page)
+            if entries:
+                pool_entries.extend(entries)
+                kept_pages.append(page)
+                productive += 1
+                if productive >= settings.resolve_pool_max_pages:
+                    break
+        pages = kept_pages or pages[: settings.resolve_pool_max_pages]
+        logger.info("/attributes spec pool: %d entries from %d productive pages",
+                    len(pool_entries), productive)
+
+        # Sparse pool → the specs are likely client-rendered or collapsed.
+        # Render the top URLs with the headless browser and merge the reveal.
+        if (settings.use_playwright and self._fetch_with_js
+                and len(pool_entries) < settings.resolve_pool_js_threshold and top_urls):
+            js_urls = top_urls[: max(1, settings.playwright_max_urls)]
+            logger.info("/attributes: sparse pool (%d), JS-rendering %s",
+                        len(pool_entries), js_urls)
+            js_htmls = await asyncio.gather(
+                *[self._fetch_with_js(u) for u in js_urls], return_exceptions=True
+            )
+            for url, html in zip(js_urls, js_htmls):
+                if not isinstance(html, str) or not html:
+                    continue
+                js_page = build_page(url, titles.get(url, ""), html)
+                js_entries = page_pool(js_page)
+                if js_entries:
+                    known = {(e.name, e.url) for e in pool_entries}
+                    pool_entries.extend(
+                        e for e in js_entries if (e.name, e.url) not in known
+                    )
+                    if all(p.url != url for p in pages):
+                        pages.append(js_page)
+                        productive += 1
+            logger.info("/attributes: pool after JS render: %d entries", len(pool_entries))
 
         infoboxes, answers = _merge_boxes(responses)
         merged = SearxNGResponse(
@@ -176,7 +228,8 @@ class ResolveService:
             infoboxes=infoboxes,
             answers=answers,
         )
-        return _Pool(pages=pages, merged=merged, specs=pool_entries)
+        return _Pool(pages=pages, merged=merged, specs=pool_entries,
+                     productive_pages=productive)
 
     # ── per-attribute raw extraction ─────────────────────────────────────
 
@@ -197,6 +250,11 @@ class ResolveService:
                 candidates += candidates_for_label(pool.specs, semantic_label)
             candidates = _dedup(candidates)
 
+            # Width/height/depth asked separately but published as one
+            # "Габарити (ШхВхГ)" row — parse the axis out of the blob.
+            if not candidates:
+                candidates = dimension_candidates(spec.name, pool.specs)
+
             # Pipeline path on already-fetched pages (no re-fetch).
             if not candidates and pool.pages:
                 candidates = await self._pipeline.run(product, spec.name, pool.merged, pool.pages)
@@ -205,7 +263,13 @@ class ResolveService:
             # shared pool is already rich: the attribute is almost certainly present,
             # so a miss is a matching problem, not missing data — firing a fresh
             # search per attribute would just burst the engines back into throttling.
-            pool_is_rich = len(pool.specs) >= settings.resolve_pool_rich_threshold
+            # "Rich" requires corroboration from ≥2 pages: one page can bulk up the
+            # count with junk (a catalog page's product cards) and would otherwise
+            # silence the fallback exactly when it's needed.
+            pool_is_rich = (
+                len(pool.specs) >= settings.resolve_pool_rich_threshold
+                and pool.productive_pages >= 2
+            )
             if (not candidates and settings.resolve_targeted_fallback
                     and not official_only and not pool_is_rich):
                 candidates = await self._targeted(product, spec.name, max_sources)
@@ -220,10 +284,16 @@ class ResolveService:
         try:
             # Keep the fallback cheap: fewer queries + a single best page, so it
             # can't fan out into the burst that re-triggers engine throttling.
-            queries = (await self._query_builder.build_queries(product, attribute))[:2]
-            responses = await asyncio.gather(*[self._searxng.search(q, num_results=8) for q in queries])
-            ranked = rank_sources(responses, None)
-            top_urls = [u for u, _ in ranked][:1]
+            # Prefer open-web queries here: the shared pool already covered the
+            # official site, so the fallback's value is source diversity
+            # (retail/aggregator pages carrying the missing label).
+            queries = await self._query_builder.build_queries(product, attribute)
+            queries = ([q for q in queries if "site:" not in q] or queries)[:2]
+            responses = await asyncio.gather(*[self._searxng.search(q, num_results=10) for q in queries])
+            ranked = rank_sources(responses, None,
+                                  brand_domains=official_domains(product.brand),
+                                  model_hints=_model_hints(product))
+            top_urls = [u for u, _ in ranked][:2]
             if not top_urls:
                 return []
             pages = keep_relevant(product, await self._fetch_pages(top_urls, dict(ranked)))
@@ -293,6 +363,10 @@ class ResolveService:
             )
 
         return [r for r in results if r is not None]
+
+
+def _model_hints(product: ProductQuery) -> list[str]:
+    return [h for h in (product.name, product.article, product.mpn) if h]
 
 
 def _cache_key(product: ProductQuery, spec: AttributeSpec, max_sources: int, official_only: bool) -> tuple:
@@ -370,10 +444,10 @@ def _coerce(
     conf = 0.85
 
     if spec.type == AttrType.INTEGER:
-        value = coerce_integer(raw_value)
+        value = coerce_integer(select_segment(raw_value, spec.name))
         conf = 0.9
     elif spec.type == AttrType.NUMBER:
-        res = coerce_number(raw_value, spec.unit)
+        res = coerce_number(select_segment(raw_value, spec.name), spec.unit)
         if res is None:
             return None
         value, unit, conf = res.value, res.unit, res.confidence
