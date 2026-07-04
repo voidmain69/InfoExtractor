@@ -11,12 +11,13 @@ from app.core.config import settings
 from app.domain.page import FetchedPage, SearxNGResponse
 from app.domain.product import ProductQuery
 from app.domain.responses import SpecsResponse
+from app.domain.brand_domains import official_domains
 from app.domain.specs import SpecGroup
 from app.extraction.all_specs import extract_all_specs, merge_spec_groups
 from app.infrastructure.query.query_builder import QueryBuilder
 from app.infrastructure.search.searxng import SearxNGClient
 from app.services.official_site import OfficialSiteResolver
-from app.services.product_match import MATCH_FLOOR, match_score
+from app.services.product_match import keep_relevant as _keep_relevant_scored
 from app.services.source_ranking import rank_sources
 from app.services.url_filter import url_matches_domain
 
@@ -89,13 +90,9 @@ def _specs_score(groups: list[SpecGroup]) -> int:
 
 
 def _keep_relevant(product: ProductQuery, pages: list[FetchedPage]) -> list[FetchedPage]:
-    """Drop pages about a different product; never return empty."""
-    relevant = [p for p in pages if match_score(product, p) >= MATCH_FLOOR]
-    if relevant:
-        return relevant
-    if pages:
-        return [max(pages, key=lambda p: match_score(product, p))]
-    return []
+    """Drop pages about a different product (shared floor logic — a page for a
+    sibling model must not become the merged 'best' source)."""
+    return _keep_relevant_scored(product, pages)
 
 
 class SpecsService:
@@ -130,9 +127,14 @@ class SpecsService:
         logger.info("/specs queries: %s", queries)
 
         responses: list[SearxNGResponse] = await asyncio.gather(
-            *[self._searxng.search(q, num_results=8) for q in queries]
+            *[self._searxng.search(q, num_results=10) for q in queries]
         )
-        ranked = rank_sources(responses, official_domain if official_only else None)
+        ranked = rank_sources(
+            responses,
+            official_domain if official_only else None,
+            brand_domains=official_domains(product.brand),
+            model_hints=[h for h in (product.name, product.article, product.mpn) if h],
+        )
 
         if official_only and official_domain:
             filtered = [(u, t) for u, t in ranked if url_matches_domain(u, official_domain)]
