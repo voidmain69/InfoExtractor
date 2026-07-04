@@ -29,8 +29,8 @@ services:
       # proxy that the Docker daemon auto-injects; outbound web fetches still use
       # PROXY_LIST. Set here (not in .env) because pydantic Settings forbids
       # unknown keys in the .env file.
-      NO_PROXY: "localhost,127.0.0.1,host.docker.internal,.local.erc,.bs.local.erc"
-      no_proxy: "localhost,127.0.0.1,host.docker.internal,.local.erc,.bs.local.erc"
+      NO_PROXY: "localhost,127.0.0.1,host.docker.internal,192.168.0.193,.local.erc,.bs.local.erc"
+      no_proxy: "localhost,127.0.0.1,host.docker.internal,192.168.0.193,.local.erc,.bs.local.erc"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
