@@ -34,3 +34,17 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
+    volumes:
+      # Persistent search-response cache: survives rebuilds so repeated
+      # identical queries never re-hit the upstream engines.
+      - ./data:/data
+    networks:
+      - default
+      - searxng
+
+# Join SearxNG's own docker network so the service reaches it as http://searxng:8080
+# regardless of host port mappings (on Windows, IIS/http.sys can shadow host:8080).
+networks:
+  searxng:
+    external: true
+    name: searxng_default

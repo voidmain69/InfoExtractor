@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import re
+import tempfile
+import time
 
 import httpx
 from cachetools import TTLCache
@@ -13,6 +17,57 @@ from app.domain.page import SearxNGResponse, SearxNGResult
 logger = logging.getLogger(__name__)
 
 _CYRILLIC_RE = re.compile(r"[Ѐ-ӿ]")
+
+
+class _DiskCache:
+    """Optional JSON-file layer under the in-memory search cache.
+
+    Search responses are the scarcest resource in the pipeline: every repeated
+    query costs upstream-engine goodwill, and a burst of identical queries
+    (service restarts, repeated batch runs) is exactly what gets engines
+    CAPTCHA-suspended. Persisting responses across restarts keeps that traffic
+    at zero. Best-effort: any I/O problem degrades to memory-only."""
+
+    def __init__(self, path: str, ttl: float):
+        self._path = path
+        self._ttl = ttl
+        self._data: dict[str, dict] = {}
+        self._lock = asyncio.Lock()
+        try:
+            with open(path, encoding="utf-8") as f:
+                raw = json.load(f)
+            now = time.time()
+            self._data = {
+                k: v for k, v in raw.items()
+                if isinstance(v, dict) and now - v.get("t", 0) < ttl
+            }
+            logger.info("search disk cache: loaded %d fresh entries", len(self._data))
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            logger.warning("search disk cache unreadable (%s), starting empty", exc)
+
+    def get(self, key: str) -> SearxNGResponse | None:
+        entry = self._data.get(key)
+        if not entry or time.time() - entry.get("t", 0) >= self._ttl:
+            return None
+        try:
+            return SearxNGResponse.model_validate(entry["resp"])
+        except Exception:
+            return None
+
+    async def set(self, key: str, resp: SearxNGResponse) -> None:
+        self._data[key] = {"t": time.time(), "resp": resp.model_dump(mode="json")}
+        async with self._lock:
+            try:
+                fd, tmp = tempfile.mkstemp(
+                    dir=os.path.dirname(self._path) or ".", suffix=".tmp"
+                )
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(self._data, f, ensure_ascii=False)
+                os.replace(tmp, self._path)
+            except Exception as exc:
+                logger.debug("search disk cache write failed: %s", exc)
 
 
 class _RateLimiter:
@@ -55,6 +110,11 @@ class SearxNGClient:
             settings.searxng_min_interval_seconds,
             settings.searxng_max_concurrency,
         )
+        self._disk: _DiskCache | None = None
+        if settings.searxng_cache_file:
+            self._disk = _DiskCache(
+                settings.searxng_cache_file, settings.searxng_cache_ttl_seconds
+            )
 
     async def search(self, query: str, num_results: int = 10) -> SearxNGResponse:
         # Don't force English when the query carries Cyrillic — it would hide
@@ -67,6 +127,14 @@ class SearxNGClient:
         if cached is not None:
             return cached
 
+        disk_key = f"{query}\x1f{num_results}\x1f{language}"
+        if self._disk is not None:
+            disk_hit = self._disk.get(disk_key)
+            if disk_hit is not None:
+                async with self._cache_lock:
+                    self._cache[cache_key] = disk_hit
+                return disk_hit
+
         response = await self._search_with_retry(query, num_results, language)
 
         # Only cache productive responses so a transient block doesn't get
@@ -74,6 +142,8 @@ class SearxNGClient:
         if response.results:
             async with self._cache_lock:
                 self._cache[cache_key] = response
+            if self._disk is not None:
+                await self._disk.set(disk_key, response)
         return response
 
     async def _search_with_retry(

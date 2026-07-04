@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     cache_max_size: int = 2000
 
     max_concurrent_fetches: int = 5
-    page_fetch_timeout_seconds: float = 8.0
+    page_fetch_timeout_seconds: float = 12.0
     max_sources: int = 5
 
     query_builder_timeout_seconds: float = 6.0
@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     # CAPTCHA/rate-limit territory.
     searxng_cache_ttl_seconds: int = 1800
     searxng_cache_max_size: int = 1000
+    # Persist search responses to this JSON file (survives restarts/rebuilds),
+    # so repeated identical queries never re-hit the upstream engines. Empty
+    # disables the disk layer. Point it into a mounted volume in docker.
+    searxng_cache_file: str = ""
     searxng_min_interval_seconds: float = 0.34  # min spacing between queries
     searxng_max_concurrency: int = 2            # parallel queries cap
     searxng_retry_attempts: int = 2             # retry empty/failed responses
@@ -87,6 +91,10 @@ class Settings(BaseSettings):
     # self-inflicted query burst that re-triggers engine throttling.
     resolve_pool_max_pages: int = 3
     resolve_pool_rich_threshold: int = 40
+    # When the static pool ends up sparser than this, JS-render the top URLs
+    # (manufacturer pages are frequently client-rendered or hide specs behind
+    # "show all") and merge whatever the browser reveals.
+    resolve_pool_js_threshold: int = 30
 
 
 settings = Settings()
