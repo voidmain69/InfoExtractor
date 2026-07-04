@@ -89,7 +89,13 @@ _WORD_RE = re.compile(r"[a-zа-яіїєґ]+", re.I)
 
 def select_segment(value: str, attribute: str) -> str:
     """When a value carries several qualified figures, keep the segment whose
-    qualifier matches the attribute ('… під час віджиму' → '73 віджимання')."""
+    qualifier matches the attribute ('… під час віджиму' → '73 віджимання').
+
+    Only numeric coercion consumes this, so a stem-matched segment WITHOUT any
+    digit is not a qualified figure — it's prose that happens to repeat the
+    attribute word ('… Memory Architecture…' for 'Maximum memory'). Returning
+    it would hide the actual figure sitting in a sibling segment ('Max. 96GB'),
+    so such matches are skipped and the full value is kept as the fallback."""
     segments = [s for s in _SEG_SPLIT_RE.split(value) if s and s.strip()]
     if len(segments) < 2:
         return value
@@ -99,7 +105,7 @@ def select_segment(value: str, attribute: str) -> str:
         return value
     for seg in segments:
         low = seg.lower()
-        if any(st in low for st in stems):
+        if any(st in low for st in stems) and any(c.isdigit() for c in seg):
             return seg.strip()
     return value
 
