@@ -1,5 +1,3 @@
-import difflib
-import re
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
@@ -7,8 +5,7 @@ from bs4 import BeautifulSoup
 from app.domain.extraction import ExtractionCandidate, ExtractionMethod, SourceResult
 from app.domain.page import FetchedPage
 from app.extraction.base import BaseExtractor
-
-_WS = re.compile(r"\s+")
+from app.extraction.label_similarity import similarity as _similarity
 
 # (label_sel, value_sel) — flat zip-based pairing. Only for structures where
 # label/value counts are guaranteed 1:1 within a scoped container (e.g. <dl>).
@@ -41,20 +38,6 @@ SITE_ROW_PATTERNS: dict[str, list[tuple[str, str, str]]] = {
         (".gpuz-specs table tr", "td:first-child", "td:last-child"),
     ],
 }
-
-
-def _norm(text: str) -> str:
-    return _WS.sub(" ", text).strip().lower()
-
-
-def _similarity(a: str, b: str) -> float:
-    na, nb = _norm(a), _norm(b)
-    ratio = difflib.SequenceMatcher(None, na, nb, autojunk=False).ratio()
-    # Boost: if the shorter string is fully contained in the longer one
-    short, long_ = (na, nb) if len(na) <= len(nb) else (nb, na)
-    if short and short in long_:
-        ratio = max(ratio, 0.80)
-    return ratio
 
 
 def _make_candidate(value: str, conf: float, page: FetchedPage) -> ExtractionCandidate:

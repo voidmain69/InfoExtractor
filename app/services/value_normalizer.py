@@ -97,8 +97,15 @@ class ValueNormalizer:
         except Exception as exc:
             logger.warning("normalizer batch failed: %s", exc)
 
-        # Fallback: passthrough each raw value with reduced confidence.
-        return [
-            NormResult(value=it.raw_value or None, unit=it.unit, matched_allowed=None, confidence=0.5)
-            for it in items
-        ]
+        # Fallback: passthrough each raw value with reduced confidence — except
+        # numeric types: they only reach the normalizer after deterministic
+        # coercion already failed, so passing the prose through would emit text
+        # as a "number". not_found is strictly better.
+        out = []
+        for it in items:
+            raw = it.raw_value or None
+            if raw and it.type in ("number", "integer"):
+                raw = None
+            out.append(NormResult(value=raw, unit=it.unit if raw else None,
+                                  matched_allowed=None, confidence=0.5 if raw else 0.0))
+        return out

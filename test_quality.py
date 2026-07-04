@@ -59,5 +59,48 @@ check("Response time", find_synonym_label("Response time", labels), "Reaction ti
 check("Panel type", find_synonym_label("Panel type", labels), "Type of matrix")
 check("Curvature", find_synonym_label("Curvature", labels), "Curved screen")
 check("Unknown attr", find_synonym_label("Random thing", labels), None)
+ua_labels = ["Швидкість віджиму", "Рівень шуму", "Підсистема пам'яті", "Програми прання"]
+check("Оберти віджиму", find_synonym_label("Оберти віджиму", ua_labels), "Швидкість віджиму")
+check("Гучність", find_synonym_label("Гучність", ua_labels), "Рівень шуму")
+check("Слоти пам'яті (multi-group)", find_synonym_label("Слоти оперативної пам'яті", ua_labels), "Підсистема пам'яті")
+check("Кількість програм ≠ список програм",
+      find_synonym_label("Кількість програм прання", ["Програми прання"]), None)
+
+print("\n=== multilingual units / ranges / model numbers ===")
+r = coerce_number("1 400 об/хв", "rpm")
+check("1 400 об/хв → rpm", (r.value, r.unit) if r else None, ("1400", "rpm"))
+r = coerce_number("2,1 кВт", "W")
+check("кВт → W", (r.value, r.unit) if r else None, ("2100", "W"))
+r = coerce_number("350 мл", "l")
+check("мл → l", (r.value, r.unit) if r else None, ("0.35", "l"))
+r = coerce_number("20 - макс. 145 / 2 - макс. 14,5", "bar")
+check("range takes upper bound", r.value if r else None, "145")
+r = coerce_number("Up to 30 pages/minute (A4 size)", "ppm")
+check("pages/minute → ppm", r.value if r else None, "30")
+r = coerce_number("60 см", "mm")
+check("см → mm", (r.value, r.unit) if r else None, ("600", "mm"))
+check("model number ignored (integer)",
+      coerce_integer("Пральна машина Bosch WAN28280UA на 8 кг"), "8")
+check("prose too long → None", coerce_integer("x" * 201 + " 5"), None)
+
+print("\n=== facet-like values (catalog filters) ===")
+from app.extraction.all_specs import _facet_like
+check("weight facet", _facet_like("10 кг 10.5 кг 11 кг 12 кг 2 кг 2.5 кг 3 кг 8 кг"), True)
+check("bare numbers facet", _facet_like("1 10 11 12 13 14 15 16 17 18 19 2 20"), True)
+check("memory row not facet", _facet_like(
+    "Support for DDR4 4733(O.C.) / 4600(O.C.) / 4400(O.C.) / 3200 / 2933 / 2667 / 2400 MT/s memory modules"), False)
+check("ports row not facet", _facet_like(
+    "1 x PS/2 port 1 x DVI-D port 1 x DisplayPort 1 x HDMI port 4 x USB 3.2 Gen 1 ports"), False)
+
+print("\n=== segment selection ===")
+from app.extraction.value_cleaner import select_segment
+check("spin noise segment", select_segment("55 прання | 73 віджимання", "Гучність під час віджиму"), "73 віджимання")
+check("no qualifier → unchanged", select_segment("55 прання | 73 віджимання", "Шум"), "55 прання | 73 віджимання")
+
+print("\n=== label similarity (token-aware) ===")
+from app.extraction.label_similarity import similarity
+check("unit suffix ≥0.85", similarity("Швидкість віджиму", "Швидкість віджиму, об/хв") >= 0.85, True)
+check("qualifier noise ≥0.85", similarity("Spin speed", "Max. spin speed (rpm)") >= 0.85, True)
+check("different attrs <0.78", similarity("Screen size", "Screen type") < 0.78, True)
 
 print("\n--- done ---")

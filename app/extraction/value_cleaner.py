@@ -6,10 +6,11 @@ import unicodedata
 
 from app.extraction.text_repair import fix_text
 
-# number + unit, e.g. "180 Hz", "1ms", "34\"", "300 cd/m2", "96GB", "2.1 V"
+# number + unit, e.g. "180 Hz", "1ms", "34\"", "300 cd/m2", "96GB", "1400 об/хв"
 _UNIT_RE = re.compile(
     r"(\d+(?:[.,]\d+)?)\s*"
-    r'(TB|GB|MB|KB|GHz|MHz|Hz|ms|mm|cm|nm|kg|nits|cd/m2|px|bit|W|V|A|"|°|inch|inches)\b',
+    r'(TB|GB|MB|KB|GHz|MHz|kHz|Hz|ms|mm|cm|nm|kg|g|nits|cd/m2|px|bit|kW|W|V|A|"|°C|°|inch|inches|'
+    r"rpm|dB|bar|ppm|dpi|ml|l|об/хв|об/мин|кг|г|л|мл|кВт|Вт|дБ|бар|мм|см|Гц|ГГц|МГц)\b",
     re.I,
 )
 
@@ -79,6 +80,28 @@ def _strip_attr_echo(value: str, attribute: str) -> str:
         tokens.pop()
     stripped = " ".join(tokens).strip(" ,;:-—–")
     return stripped or value
+
+
+# Multi-part value segments: "55 прання | 73 віджимання", "53 dB washing; 73 dB spin"
+_SEG_SPLIT_RE = re.compile(r"\s*[|;•]\s*|\s{3,}|,\s+(?=[^\d\s])")
+_WORD_RE = re.compile(r"[a-zа-яіїєґ]+", re.I)
+
+
+def select_segment(value: str, attribute: str) -> str:
+    """When a value carries several qualified figures, keep the segment whose
+    qualifier matches the attribute ('… під час віджиму' → '73 віджимання')."""
+    segments = [s for s in _SEG_SPLIT_RE.split(value) if s and s.strip()]
+    if len(segments) < 2:
+        return value
+    # Stem crudely by prefix so inflected forms match (віджиму ~ віджимання).
+    stems = {w.lower()[:5] for w in _WORD_RE.findall(attribute) if len(w) >= 5}
+    if not stems:
+        return value
+    for seg in segments:
+        low = seg.lower()
+        if any(st in low for st in stems):
+            return seg.strip()
+    return value
 
 
 def clean_value(value: str, attribute: str) -> tuple[str, str | None]:
