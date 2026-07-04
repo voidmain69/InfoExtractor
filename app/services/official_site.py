@@ -8,6 +8,7 @@ from app.core.config import settings
 from app.domain.product import ProductQuery
 from app.infrastructure.llm.ollama import OllamaGateway
 from app.infrastructure.search.searxng import SearxNGClient
+from app.domain.brand_domains import primary_domain
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,13 @@ class OfficialSiteResolver:
 
     async def resolve(self, product: ProductQuery) -> str | None:
         hint = _brand_hint(product)
+
+        # Curated table first: exact, instant, and independent of the LLM host.
+        curated = primary_domain(hint)
+        if curated:
+            logger.info("official domain via curated table: %s", curated)
+            return curated
+
         domain = await self._resolve_via_llm(hint)
         if domain:
             logger.info("official domain via LLM: %s", domain)

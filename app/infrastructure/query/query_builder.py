@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from app.core.config import settings
+from app.domain.brand_domains import primary_domain
 from app.domain.product import ProductQuery
 from app.infrastructure.llm.ollama import OllamaGateway
 
@@ -90,10 +91,25 @@ class QueryBuilder:
                 _SPECS_SYSTEM_PROMPT, product_ctx + extra,
                 timeout=settings.query_builder_timeout_seconds,
             )
-            return _validate(result)[:2]
+            queries = _validate(result)[:2]
         except Exception as exc:
             logger.warning("build_specs_queries fallback: %s", exc)
-            return _fallback_specs_queries(product, official_domain)
+            queries = _fallback_specs_queries(product, official_domain)
+        # Deterministic manufacturer-site query: the official page is almost
+        # always the best source, so ask for it explicitly regardless of what
+        # the LLM generated.
+        brand_site = primary_domain(product.brand)
+        if brand_site and not official_domain:
+            site_q = f"site:{brand_site} {product.name}"
+            if not any("site:" in q for q in queries):
+                queries = [site_q] + queries
+        # Aggregators with uniformly structured spec tables — a reliable
+        # fallback source regardless of which general engines are alive.
+        if not official_domain:
+            queries.append(
+                f"{product.search_string()} site:hotline.ua OR site:rozetka.com.ua OR site:ek.ua"
+            )
+        return _dedupe(queries)[:4]
 
 
 def _validate(queries) -> list[str]:
@@ -102,42 +118,55 @@ def _validate(queries) -> list[str]:
     raise ValueError("Unexpected Ollama response format")
 
 
+def _dedupe(queries: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for q in queries:
+        key = q.strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            out.append(q.strip())
+    return out
+
+
 def _fallback_queries(product: ProductQuery, attribute: str, official_domain: str | None = None) -> list[str]:
     search = product.search_string()
     if official_domain:
         return [
-            f'site:{official_domain} "{search}" {attribute}',
+            f'site:{official_domain} "{product.name}"',
             f'site:{official_domain} {search} specifications {attribute}',
-            f'site:{official_domain} {search} manual {attribute}',
+            f'"{search}" {attribute} specifications',
         ]
+    brand_site = primary_domain(product.brand)
+    queries = []
+    if brand_site:
+        queries.append(f'site:{brand_site} {product.name}')
     barcode = product.ean13 or product.upc
     if barcode:
-        return [
-            f'"{barcode}" {attribute} specifications',
-            f'"{search}" {attribute} specifications',
-            f'"{search}" {attribute} site:techpowerup.com OR site:gsmarena.com',
-        ]
-    return [
+        queries.append(f'"{barcode}" {attribute} specifications')
+    queries += [
         f'"{search}" {attribute} specifications',
-        f'"{search}" {attribute} site:techpowerup.com OR site:gsmarena.com',
-        f'"{search}" datasheet {attribute}',
+        f'{search} specifications {attribute}',
     ]
+    return _dedupe(queries)[:3]
 
 
 def _fallback_specs_queries(product: ProductQuery, official_domain: str | None) -> list[str]:
+    """Deterministic spec-page queries. Unquoted variants matter: engines drop
+    quoted phrases entirely when the exact string is rare, which is common for
+    model numbers written slightly differently across sites."""
     search = product.search_string()
     if official_domain:
         return [
-            f'site:{official_domain} "{search}" specifications',
-            f'site:{official_domain} {search} technical specifications',
+            f'site:{official_domain} "{product.name}"',
+            f'site:{official_domain} {search} specifications',
         ]
     barcode = product.ean13 or product.upc
+    queries = []
     if barcode:
-        return [
-            f'"{barcode}" full specifications',
-            f'"{search}" complete specifications',
-        ]
-    return [
-        f'"{search}" complete specifications',
-        f'"{search}" full specifications',
+        queries.append(f'"{barcode}" specifications')
+    queries += [
+        f'{search} specifications',
+        f'{search} характеристики',
     ]
+    return _dedupe(queries)[:3]
