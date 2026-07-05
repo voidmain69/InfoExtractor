@@ -85,17 +85,20 @@ def _strip_attr_echo(value: str, attribute: str) -> str:
 # Multi-part value segments: "55 прання | 73 віджимання", "53 dB washing; 73 dB spin"
 _SEG_SPLIT_RE = re.compile(r"\s*[|;•]\s*|\s{3,}|,\s+(?=[^\d\s])")
 _WORD_RE = re.compile(r"[a-zа-яіїєґ]+", re.I)
+# A digit that starts a real figure — not one glued into a token ("DDR5", "H610").
+_STANDALONE_DIGIT_RE = re.compile(r"(?<!\w)\d")
 
 
 def select_segment(value: str, attribute: str) -> str:
     """When a value carries several qualified figures, keep the segment whose
     qualifier matches the attribute ('… під час віджиму' → '73 віджимання').
 
-    Only numeric coercion consumes this, so a stem-matched segment WITHOUT any
-    digit is not a qualified figure — it's prose that happens to repeat the
-    attribute word ('… Memory Architecture…' for 'Maximum memory'). Returning
-    it would hide the actual figure sitting in a sibling segment ('Max. 96GB'),
-    so such matches are skipped and the full value is kept as the fallback."""
+    Only numeric coercion consumes this, so a stem-matched segment WITHOUT a
+    standalone number is not a qualified figure — it's prose that happens to
+    repeat the attribute word ('un-buffered DDR5 memory supports…' for
+    'Maximum memory'; the 5 glued into DDR5 doesn't count). Returning it would
+    hide the actual figure sitting in a sibling segment ('Max. 96GB'), so such
+    matches are skipped and the full value is kept as the fallback."""
     segments = [s for s in _SEG_SPLIT_RE.split(value) if s and s.strip()]
     if len(segments) < 2:
         return value
@@ -105,7 +108,7 @@ def select_segment(value: str, attribute: str) -> str:
         return value
     for seg in segments:
         low = seg.lower()
-        if any(st in low for st in stems) and any(c.isdigit() for c in seg):
+        if any(st in low for st in stems) and _STANDALONE_DIGIT_RE.search(seg):
             return seg.strip()
     return value
 
