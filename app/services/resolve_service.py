@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
@@ -318,12 +319,25 @@ class ResolveService:
 
     def _build_pool_from_text(self, text: str) -> _Pool:
         """Build a spec pool from operator-supplied text (parsed file content).
-        No pages → the per-attribute LLM pipeline can't run; resolution is purely
-        deterministic pool matching + coercion + the batched normalizer."""
-        pool_entries = text_pool(text, url="imported-text")
-        logger.info("/attributes/from-text: %d spec pairs parsed from %d chars",
-                    len(pool_entries), len(text))
-        return _Pool(pages=[], merged=_empty_response(),
+
+        HTML content (a saved product page / pasted markup) runs through the full
+        spec extractor (site-CSS, JSON-LD, embedded JSON, tables/dl/li) via
+        page_pool — the same coverage as a fetched URL, minus the network. Plain
+        text falls back to "Label: value" line parsing. HTML keeps a synthetic
+        page so the per-attribute LLM pipeline can fill misses; plain text has no
+        DOM to run it on."""
+        if _looks_html(text):
+            page = build_page("imported-html", "", text)
+            pool_entries = page_pool(page)
+            pages = [page]
+            logger.info("/attributes/from-text: HTML detected -> %d specs via extract_all_specs",
+                        len(pool_entries))
+        else:
+            pool_entries = text_pool(text, url="imported-text")
+            pages = []
+            logger.info("/attributes/from-text: %d spec pairs from %d chars of text",
+                        len(pool_entries), len(text))
+        return _Pool(pages=pages, merged=_empty_response(),
                      specs=pool_entries, productive_pages=1 if pool_entries else 0)
 
     # ── per-attribute raw extraction ─────────────────────────────────────
@@ -484,6 +498,20 @@ def _dedup(candidates: list[ExtractionCandidate]) -> list[ExtractionCandidate]:
             seen.add(key)
             out.append(c)
     return out
+
+
+_HTML_HINT_RE = re.compile(r"<(?:table|html|body|div|ul|dl|section|script|article)\b", re.I)
+
+
+def _looks_html(text: str) -> bool:
+    """Does this text carry HTML markup worth extracting structurally (tables /
+    JSON-LD / embedded JSON) rather than parsing as 'Label: value' lines? Requires
+    a leading '<' plus a spec-bearing tag early on, so a stray '<' in prose (or a
+    value like '<0.5 ms') doesn't trip it."""
+    stripped = text.lstrip()
+    if not stripped.startswith("<"):
+        return False
+    return bool(_HTML_HINT_RE.search(stripped[:5000]))
 
 
 def _empty_response() -> SearxNGResponse:

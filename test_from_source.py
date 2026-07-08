@@ -121,6 +121,34 @@ async def test_resolve_from_url_missing_attr_not_found():
 
 # ── resolve_from_text ────────────────────────────────────────────────────────
 
+_HTML_PAGE = """
+<html><body>
+  <nav>Каталог Кошик</nav>
+  <script type="application/ld+json">
+    {"@type":"Product","additionalProperty":[
+      {"@type":"PropertyValue","name":"Refresh rate","value":"180 Hz"}]}
+  </script>
+  <table class="specs">
+    <tr><td>Panel type</td><td>VA</td></tr>
+    <tr><td>Response time</td><td>1 ms</td></tr>
+  </table>
+</body></html>
+"""
+
+
+@pytest.mark.asyncio
+async def test_resolve_from_text_html_uses_full_extractor():
+    # HTML text → extract_all_specs (JSON-LD + table), not line parsing.
+    svc = _service(AsyncMock(return_value=[]), AsyncMock(return_value=None))
+    resp = await svc.resolve_from_text(_HTML_PAGE, _ATTRS)
+    by = {r.name: r for r in resp.results}
+    # Refresh rate comes from JSON-LD; Panel type from the table.
+    assert by["Refresh rate"].value == "180"
+    assert by["Refresh rate"].unit == "Hz"
+    assert by["Panel type"].value == "VA"
+    assert by["Panel type"].matched_allowed is True
+
+
 @pytest.mark.asyncio
 async def test_resolve_from_text_types_and_snaps():
     # No page fetch on the text path.
