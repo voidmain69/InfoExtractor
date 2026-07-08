@@ -33,6 +33,7 @@ from app.services.attribute_matcher import (
     match_in_pool,
     page_pool,
     pool_labels,
+    text_pool,
 )
 from app.domain.brand_domains import official_domains
 from app.services.official_site import OfficialSiteResolver
@@ -108,35 +109,10 @@ class ResolveService:
 
         if misses:
             pool = await self._build_pool(product, official_only, max_sources)
-
-            # 2a. Map every requested attribute onto the page's actual labels by
-            # meaning. A curated synonym table resolves the well-known cases
-            # deterministically; only the leftovers go to the LLM semantic call.
-            semantic_labels: list[str | None] = [None] * len(misses)
-            labels = pool_labels(pool.specs) if pool.specs else []
-            if labels:
-                unresolved_idx: list[int] = []
-                unresolved_names: list[str] = []
-                for j, (_, spec) in enumerate(misses):
-                    syn = find_synonym_label(spec.name, labels)
-                    if syn is not None:
-                        semantic_labels[j] = syn
-                    else:
-                        unresolved_idx.append(j)
-                        unresolved_names.append(spec.name)
-                if unresolved_names:
-                    llm_labels = await self._semantic_matcher.match(unresolved_names, labels)
-                    for j, lbl in zip(unresolved_idx, llm_labels):
-                        semantic_labels[j] = lbl
-
-            # 2b. Resolve raw values for all misses (bounded concurrency).
-            raw_list = await asyncio.gather(
-                *[self._resolve_raw(product, spec, pool, label, official_only, max_sources)
-                  for (_, spec), label in zip(misses, semantic_labels)]
+            resolved = await self._resolve_against_pool(
+                product, [s for _, s in misses], pool,
+                official_only=official_only, max_sources=max_sources, allow_targeted=True,
             )
-
-            # 3. Normalize (single batched AI call) + assemble.
-            resolved = await self._normalize_all([s for _, s in misses], raw_list)
             for (i, spec), res in zip(misses, resolved):
                 results[i] = res
                 if res.status == ResolveStatus.FOUND:
@@ -144,6 +120,83 @@ class ResolveService:
 
         ordered = [results[i] for i in range(len(attributes))]
         return ResolveResponse(product=product, results=ordered, cached=not misses)
+
+    async def resolve_from_url(
+        self, url: str, attributes: list[AttributeSpec]
+    ) -> ResolveResponse:
+        """Resolve typed attributes from a single operator-supplied product URL.
+
+        Bypasses search entirely: the page (+ Playwright reveal when sparse) is the
+        only source. The full downstream pipeline — synonym/fuzzy/semantic match,
+        deterministic coercion, unit conversion, enum snap, reconcile, provenance —
+        runs unchanged. `allow_targeted=False`: no per-attribute web fallback, since
+        the operator explicitly pinned the source."""
+        product = ProductQuery(name=url[:300])
+        pool = await self._build_pool_from_url(url)
+        resolved = await self._resolve_against_pool(
+            product, attributes, pool,
+            official_only=False, max_sources=0, allow_targeted=False,
+        )
+        return ResolveResponse(product=product, results=resolved, cached=False)
+
+    async def resolve_from_text(
+        self, text: str, attributes: list[AttributeSpec]
+    ) -> ResolveResponse:
+        """Resolve typed attributes from operator-supplied text (parsed file
+        content). Deterministic-first: a spec pool is built from "Label: value"
+        lines, then coerced/unit-converted/enum-snapped. No search and no page
+        pipeline — a bare text blob has no DOM to LLM-extract, so unmatched
+        attributes come back not_found for the caller to handle."""
+        product = ProductQuery(name="imported-text")
+        pool = self._build_pool_from_text(text)
+        resolved = await self._resolve_against_pool(
+            product, attributes, pool,
+            official_only=False, max_sources=0, allow_targeted=False,
+        )
+        return ResolveResponse(product=product, results=resolved, cached=False)
+
+    # ── shared resolution core (pool → typed values) ──────────────────────
+
+    async def _resolve_against_pool(
+        self,
+        product: ProductQuery,
+        attributes: list[AttributeSpec],
+        pool: _Pool,
+        official_only: bool,
+        max_sources: int,
+        allow_targeted: bool,
+    ) -> list[ResolvedAttribute]:
+        """Resolve a list of typed attributes against an already-built spec pool.
+        Shared by search (`resolve`), URL (`resolve_from_url`) and text
+        (`resolve_from_text`) — only pool-building differs."""
+        # Map every requested attribute onto the page's actual labels by meaning.
+        # A curated synonym table resolves the well-known cases deterministically;
+        # only the leftovers go to the LLM semantic call.
+        semantic_labels: list[str | None] = [None] * len(attributes)
+        labels = pool_labels(pool.specs) if pool.specs else []
+        if labels:
+            unresolved_idx: list[int] = []
+            unresolved_names: list[str] = []
+            for j, spec in enumerate(attributes):
+                syn = find_synonym_label(spec.name, labels)
+                if syn is not None:
+                    semantic_labels[j] = syn
+                else:
+                    unresolved_idx.append(j)
+                    unresolved_names.append(spec.name)
+            if unresolved_names:
+                llm_labels = await self._semantic_matcher.match(unresolved_names, labels)
+                for j, lbl in zip(unresolved_idx, llm_labels):
+                    semantic_labels[j] = lbl
+
+        # Resolve raw values for all attributes (bounded concurrency).
+        raw_list = await asyncio.gather(
+            *[self._resolve_raw(product, spec, pool, label, official_only, max_sources, allow_targeted)
+              for spec, label in zip(attributes, semantic_labels)]
+        )
+
+        # Normalize (single batched AI call) + assemble.
+        return await self._normalize_all(attributes, raw_list)
 
     # ── shared source pool ────────────────────────────────────────────────
 
@@ -231,6 +284,48 @@ class ResolveService:
         return _Pool(pages=pages, merged=merged, specs=pool_entries,
                      productive_pages=productive)
 
+    async def _build_pool_from_url(self, url: str) -> _Pool:
+        """Build a spec pool from a single operator-supplied URL (no search).
+        Fetch the page, extract specs, and — when the static pool is sparse —
+        JS-render with Playwright and merge the reveal (same sparse-pool guard as
+        the search path)."""
+        pages = await self._fetch_pages([url], {url: ""})
+        pool_entries: list[PooledSpec] = []
+        kept: list[FetchedPage] = []
+        for page in pages:
+            entries = page_pool(page)
+            if entries:
+                pool_entries.extend(entries)
+                kept.append(page)
+
+        if (settings.use_playwright and self._fetch_with_js
+                and len(pool_entries) < settings.resolve_pool_js_threshold):
+            logger.info("/attributes/from-url: sparse pool (%d), JS-rendering %s",
+                        len(pool_entries), url)
+            js_html = await self._fetch_with_js(url)
+            if isinstance(js_html, str) and js_html:
+                js_page = build_page(url, "", js_html)
+                js_entries = page_pool(js_page)
+                known = {(e.name, e.url) for e in pool_entries}
+                new = [e for e in js_entries if (e.name, e.url) not in known]
+                if new:
+                    pool_entries.extend(new)
+                    kept.append(js_page)
+            logger.info("/attributes/from-url: pool after JS render: %d entries", len(pool_entries))
+
+        return _Pool(pages=kept or pages, merged=_empty_response(),
+                     specs=pool_entries, productive_pages=len(kept))
+
+    def _build_pool_from_text(self, text: str) -> _Pool:
+        """Build a spec pool from operator-supplied text (parsed file content).
+        No pages → the per-attribute LLM pipeline can't run; resolution is purely
+        deterministic pool matching + coercion + the batched normalizer."""
+        pool_entries = text_pool(text, url="imported-text")
+        logger.info("/attributes/from-text: %d spec pairs parsed from %d chars",
+                    len(pool_entries), len(text))
+        return _Pool(pages=[], merged=_empty_response(),
+                     specs=pool_entries, productive_pages=1 if pool_entries else 0)
+
     # ── per-attribute raw extraction ─────────────────────────────────────
 
     async def _resolve_raw(
@@ -241,6 +336,7 @@ class ResolveService:
         semantic_label: str | None,
         official_only: bool,
         max_sources: int,
+        allow_targeted: bool = True,
     ) -> _Raw:
         async with self._sem:
             # Cheap path: string-fuzzy match against the already-extracted pool …
@@ -270,7 +366,7 @@ class ResolveService:
                 len(pool.specs) >= settings.resolve_pool_rich_threshold
                 and pool.productive_pages >= 2
             )
-            if (not candidates and settings.resolve_targeted_fallback
+            if (not candidates and allow_targeted and settings.resolve_targeted_fallback
                     and not official_only and not pool_is_rich):
                 candidates = await self._targeted(product, spec.name, max_sources)
 
@@ -388,6 +484,13 @@ def _dedup(candidates: list[ExtractionCandidate]) -> list[ExtractionCandidate]:
             seen.add(key)
             out.append(c)
     return out
+
+
+def _empty_response() -> SearxNGResponse:
+    """A search response with no results — used as the pool's `merged` field on
+    the URL/text paths, which don't search. The pipeline fallback reads infoboxes
+    from it; empty means it contributes nothing, exactly as intended."""
+    return SearxNGResponse(results=[], infoboxes=[], answers=[])
 
 
 def _merge_boxes(responses: list[SearxNGResponse]) -> tuple[list, list]:
