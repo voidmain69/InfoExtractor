@@ -10,8 +10,14 @@ from app.domain.page import FetchedPage
 from app.extraction.all_specs import extract_all_specs
 from app.extraction.coerce import has_unit, label_unit
 from app.extraction.label_similarity import similarity as _similarity
+from app.extraction.text_repair import fix_text
 
 _WS = re.compile(r"\s+")
+
+# "Label: value" line, e.g. "Потужність: 2100 Вт" / "Print speed: 30 ppm". The
+# label is 2–70 chars and value non-empty — same shape the HTML colon-line
+# extractor uses, so text and page pools agree on what counts as a spec line.
+_TEXT_PAIR_RE = re.compile(r"^\s*([^:\n]{2,70})\s*[::]\s*(\S.{0,300})$")
 
 
 def _value_with_label_unit(spec: PooledSpec) -> str:
@@ -46,6 +52,34 @@ def build_spec_pool(pages: list[FetchedPage]) -> list[PooledSpec]:
     for page in pages:
         pool.extend(page_pool(page))
     return pool
+
+
+def text_pool(text: str, url: str = "imported-text", title: str = "") -> list[PooledSpec]:
+    """Parse operator-supplied text (parsed file content) into pool entries.
+
+    Deterministic, no LLM: each "Label: value" line becomes one PooledSpec. Cells
+    joined with " | " (how the xlsx flattener emits a row) are split first, so a
+    row "Потужність: 2100 | Вага: 5.2" yields two specs. Duplicate (label, value)
+    pairs are dropped; mojibake in either half is repaired to match page pools.
+    """
+    out: list[PooledSpec] = []
+    seen: set[tuple[str, str]] = set()
+    for raw_line in text.splitlines():
+        segments = raw_line.split(" | ") if " | " in raw_line else [raw_line]
+        for seg in segments:
+            m = _TEXT_PAIR_RE.match(_WS.sub(" ", fix_text(seg)).strip())
+            if not m:
+                continue
+            name = m.group(1).strip()
+            value = m.group(2).strip()
+            if not name or not value or name == value:
+                continue
+            key = (name.lower(), value)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(PooledSpec(name=name, value=value, url=url, title=title))
+    return out
 
 
 def _confidence(sim: float) -> float:
