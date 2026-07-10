@@ -14,6 +14,7 @@ from app.domain.extraction import ExtractionCandidate, SourceResult
 from app.domain.page import FetchedPage, SearxNGResponse
 from app.domain.product import ProductQuery
 from app.domain.responses import ResolveResponse
+from app.domain.claims import Claim, ClaimEvidence, ClaimsResponse
 from app.extraction.coerce import (
     coerce_boolean,
     coerce_integer,
@@ -155,6 +156,25 @@ class ResolveService:
             official_only=False, max_sources=0, allow_targeted=False,
         )
         return ResolveResponse(product=product, results=resolved, cached=False)
+
+    def claims_from_text(self, text: str) -> ClaimsResponse:
+        """Return the document's raw label:value facts as category-BLIND claims
+        (Phase-3 Ц1 / М1b). Fully deterministic — the text pool is built without
+        the LLM, so a structured claim is a verbatim source row and cannot be a
+        hallucination. The consumer maps `raw_label` onto its own template keys.
+        Evidence carries the source span so an unsupported downstream value can be
+        rejected. No category schema is required in the request."""
+        pool = self._build_pool_from_text(text)
+        claims: list[Claim] = []
+        for spec in pool.specs:
+            start = text.find(spec.name)
+            evidence = ClaimEvidence(
+                char_start=start if start >= 0 else None,
+                char_end=(start + len(spec.name)) if start >= 0 else None,
+                snippet=f"{spec.name}: {spec.value}"[:200],
+            )
+            claims.append(Claim(raw_label=spec.name, raw_value=spec.value, kind="structured", evidence=evidence))
+        return ClaimsResponse(claims=claims)
 
     # ── shared resolution core (pool → typed values) ──────────────────────
 

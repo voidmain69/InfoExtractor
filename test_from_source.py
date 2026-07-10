@@ -62,6 +62,28 @@ def _service(fetch_pages, fetch_with_js) -> ResolveService:
     )
 
 
+# ── claims/from-text (Ц1 / М1b) ──────────────────────────────────────────────
+
+def test_claims_from_text_structured_verbatim():
+    """Claims are verbatim source rows — deterministic, no LLM, no resolution."""
+    svc = _service(fetch_pages=AsyncMock(return_value=[]), fetch_with_js=None)
+    resp = svc.claims_from_text("Processor socket: AM5\nChipset: AMD B850\n")
+    got = {(c.raw_label, c.raw_value) for c in resp.claims}
+    assert ("Processor socket", "AM5") in got
+    assert ("Chipset", "AMD B850") in got
+    assert all(c.kind == "structured" for c in resp.claims)
+
+
+def test_claims_from_text_evidence_spans_point_at_the_label():
+    text = "Socket: AM5\nChipset: AMD B850\n"
+    svc = _service(fetch_pages=AsyncMock(return_value=[]), fetch_with_js=None)
+    resp = svc.claims_from_text(text)
+    located = [c for c in resp.claims if c.evidence.char_start is not None]
+    assert located, "at least one claim should locate its label in the source"
+    for c in located:
+        assert text[c.evidence.char_start:c.evidence.char_end] == c.raw_label
+
+
 # ── text_pool ────────────────────────────────────────────────────────────────
 
 def test_text_pool_colon_lines():
