@@ -20,6 +20,14 @@ _BREAKER_FAILURES = 2
 _BREAKER_COOLDOWN = 120.0
 _CONNECT_TIMEOUT = 3.0
 
+# Deterministic decoding: greedy (temperature 0) + a fixed seed so the same
+# (model, prompt) yields byte-identical output across runs. Ollama's default is
+# temperature 0.8 with a random seed — the root of П6 (the same spec text
+# resolved to 10 vs 8 attributes between runs), which makes the acquisition
+# benchmark noisy and un-A/B-able. top_p tightened to match catalog-service's
+# own ollama-client. (Phase-3 М1b — determinism.)
+_GEN_OPTIONS = {"temperature": 0, "top_p": 0.1, "seed": 42}
+
 
 class OllamaUnavailable(Exception):
     """Raised immediately while the circuit breaker is open."""
@@ -52,6 +60,7 @@ class OllamaGateway:
                 {"role": "user", "content": user},
             ],
             "stream": False,
+            "options": _GEN_OPTIONS,
             **({"keep_alive": self._keep_alive} if self._keep_alive else {}),
         }
         return await asyncio.wait_for(self._post(payload, timeout), timeout=timeout)
