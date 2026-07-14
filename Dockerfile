@@ -1,4 +1,4 @@
-FROM python:3.11-slim-bookworm
+FROM python:3.14-slim-bookworm
 
 # Install browsers to a shared path so the non-root runtime user can read them.
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
