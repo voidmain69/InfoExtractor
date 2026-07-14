@@ -9,6 +9,15 @@ updates:
       time: "06:00"
       timezone: "Europe/Kyiv"
     open-pull-requests-limit: 5
+    # Supply-chain cooldown: don't propose a release until it has aged on
+    # PyPI. Compromised-maintainer publishes are typically caught and yanked
+    # within 24–72h; letting versions rest a few days sidesteps the window
+    # where a hijacked package looks like a routine bump. (Security updates
+    # for known CVEs bypass cooldown — they come through the separate
+    # Dependabot security-update flow.)
+    cooldown:
+      default-days: 5
+      semver-major-days: 14
     groups:
       # One PR for routine patch/minor bumps; majors stay separate so a
       # breaking bump (pydantic, httpx, playwright) is reviewed on its own.
@@ -32,14 +41,18 @@ updates:
     ignore:
       - dependency-name: "python"
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
+    cooldown:
+      default-days: 7
     labels:
       - "dependencies"
       - "docker"
 
-  # Future GitHub Actions workflows (no-op until .github/workflows exists)
+  # GitHub Actions workflow dependencies
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     labels:
       - "dependencies"
