@@ -2,15 +2,23 @@
 import sys
 sys.path.insert(0, ".")
 
+# Windows consoles default to cp1252 and choke on the unicode test fixtures.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 from app.extraction.text_repair import fix_text
 from app.extraction.coerce import coerce_integer, coerce_number, coerce_boolean, snap_enum
 from app.extraction.value_cleaner import clean_value
 from app.services.synonyms import find_synonym_label
 
 PASS, FAIL = "PASS", "FAIL"
+_failures = 0
 
 def check(label, got, expected):
+    global _failures
     ok = got == expected
+    if not ok:
+        _failures += 1
     print(f"  {PASS if ok else FAIL}: {label}: got={got!r} expected={expected!r}")
 
 print("=== text_repair (mojibake) ===")
@@ -103,4 +111,5 @@ check("unit suffix ≥0.85", similarity("Швидкість віджиму", "Ш
 check("qualifier noise ≥0.85", similarity("Spin speed", "Max. spin speed (rpm)") >= 0.85, True)
 check("different attrs <0.78", similarity("Screen size", "Screen type") < 0.78, True)
 
-print("\n--- done ---")
+print(f"\n--- done, {_failures} failure(s) ---")
+sys.exit(1 if _failures else 0)
