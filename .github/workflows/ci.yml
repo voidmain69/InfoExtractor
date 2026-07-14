@@ -25,8 +25,10 @@ jobs:
       # sdist runs arbitrary setup.py code at install time, a wheel doesn't.
       # If a pinned package ever ships without a wheel, this fails loudly —
       # that's a deliberate review point, not an inconvenience.
+      # Quoted: ":all: " inside a plain YAML scalar is "colon-space" — GitHub
+      # Actions' lenient parser accepts it, Dependabot's strict one does not.
       - name: Install dependencies
-        run: pip install --only-binary=:all: -r requirements.txt -r requirements-dev.txt
+        run: "pip install --only-binary=:all: -r requirements.txt -r requirements-dev.txt"
 
       - name: Byte-compile all sources
         run: python -m compileall -q app main.py
