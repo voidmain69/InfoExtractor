@@ -25,6 +25,13 @@ updates:
       day: "monday"
       time: "06:00"
       timezone: "Europe/Kyiv"
+    # Patch/minor tag updates only. A Python major (3.11 → 3.x) must be a
+    # deliberate migration together with the dependency pins and the CI
+    # python-version — a green check on a Dockerfile-only bump proves nothing
+    # (tests run on the CI matrix version, not in the image).
+    ignore:
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
     labels:
       - "dependencies"
       - "docker"
