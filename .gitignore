@@ -4,6 +4,7 @@
 
 # Python
 .venv/
+.venv*/
 venv/
 __pycache__/
 *.pyc
@@ -32,4 +33,8 @@ build/
 .idea/
 *.swp
 *.swo
+
+# Runtime artifacts
 data/
+bench_run*.json
+bench_*.json

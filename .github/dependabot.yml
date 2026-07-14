@@ -1,0 +1,38 @@
+version: 2
+updates:
+  # Python dependencies (requirements.txt + requirements-dev.txt)
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Kyiv"
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for routine patch/minor bumps; majors stay separate so a
+      # breaking bump (pydantic, httpx, playwright) is reviewed on its own.
+      minor-and-patch:
+        update-types: ["minor", "patch"]
+    labels:
+      - "dependencies"
+
+  # Base image in the Dockerfile (python:3.11-slim-bookworm security patches)
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Kyiv"
+    labels:
+      - "dependencies"
+      - "docker"
+
+  # Future GitHub Actions workflows (no-op until .github/workflows exists)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
