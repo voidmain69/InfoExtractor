@@ -21,8 +21,12 @@ jobs:
             requirements.txt
             requirements-dev.txt
 
+      # --only-binary=:all: is pip's equivalent of npm's ignore-scripts: an
+      # sdist runs arbitrary setup.py code at install time, a wheel doesn't.
+      # If a pinned package ever ships without a wheel, this fails loudly —
+      # that's a deliberate review point, not an inconvenience.
       - name: Install dependencies
-        run: pip install -r requirements.txt -r requirements-dev.txt
+        run: pip install --only-binary=:all: -r requirements.txt -r requirements-dev.txt
 
       - name: Byte-compile all sources
         run: python -m compileall -q app main.py
