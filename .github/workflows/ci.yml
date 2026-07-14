@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  tests:
+    name: Unit tests & import smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Byte-compile all sources
+        run: python -m compileall -q app main.py
+
+      # Importing main builds the FastAPI app (routes, middleware, DI wiring)
+      # without touching SearxNG/Ollama — catches breaking API changes in
+      # pydantic/httpx/fastapi that compileall can't see.
+      - name: App import smoke
+        run: python -c "import main; print('app ok:', main.app.title)"
+
+      # Deterministic extraction/normalization regressions (coercion, units,
+      # synonyms, facet guard, mojibake repair) — no network needed.
+      - name: Extraction quality unit tests
+        run: python test_quality.py
+
+      # Typed-resolve paths with mocked LLM/fetchers; deterministic core real.
+      - name: Resolve-service tests (pytest)
+        run: pytest test_from_source.py -q
+
+  audit:
+    name: Dependency vulnerability audit
+    runs-on: ubuntu-latest
+    # Advisory, not blocking: pinned transitive CVEs without an upstream fix
+    # would otherwise freeze every unrelated PR. Dependabot security updates
+    # (enabled repo-wide) handle the actionable ones automatically.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: pip-audit
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt
