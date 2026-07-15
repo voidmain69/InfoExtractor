@@ -6,7 +6,9 @@ class Settings(BaseSettings):
 
     searxng_url: str = "http://localhost:8080"
     ollama_url: str = "http://localhost:11434"
-    ollama_model: str = "gemma3:4b"
+    # Aligned with catalog-service so the shared GPU host keeps ONE model
+    # resident in VRAM instead of swapping between the two services' models.
+    ollama_model: str = "qwen2.5:14b-instruct"
     # How long Ollama keeps the model resident after a call (Ollama's own
     # default is a mere 5m). On a CPU-only host a cold load takes minutes —
     # longer than every per-stage timeout — so an evicted model turns the first
@@ -44,6 +46,20 @@ class Settings(BaseSettings):
     resolve_targeted_fallback: bool = True
     resolve_match_threshold: float = 0.78  # spec-pool fuzzy name match
     normalize_timeout_seconds: float = 30.0
+
+    # TEI (Text Embeddings Inference) for the semantic attribute→label match.
+    # An empty tei_dense_url disables the vector tier entirely: SemanticMatcher
+    # then behaves exactly as before (curated synonyms upstream + the LLM tail).
+    # rerank_url is optional — set it to add a cross-encoder reorder over the
+    # dense candidates. Mirrors catalog-service's bge-m3 / bge-reranker-v2-m3.
+    tei_dense_url: str = ""
+    tei_rerank_url: str = ""
+    tei_timeout_seconds: float = 10.0
+    # Accept a dense match at/above this cosine and only when it beats the
+    # runner-up by the margin — else defer to the LLM (mirrors the catalog
+    # import key-mapping ANN tier: 0.72 / 0.04).
+    semantic_ann_accept: float = 0.72
+    semantic_ann_margin: float = 0.04
 
     user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
