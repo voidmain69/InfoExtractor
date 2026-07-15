@@ -13,6 +13,7 @@ from app.infrastructure.cache.ttl_cache import TTLCacheStore
 from app.infrastructure.fetch.browser_fetcher import fetch_with_js
 from app.infrastructure.fetch.http_fetcher import fetch_pages
 from app.infrastructure.llm.ollama import OllamaGateway
+from app.infrastructure.tei.tei_gateway import TeiGateway
 from app.infrastructure.query.query_builder import QueryBuilder
 from app.infrastructure.search.searxng import SearxNGClient
 from app.services.attribute_service import AttributeService
@@ -43,7 +44,18 @@ async def lifespan(app: FastAPI):
     official_site = OfficialSiteResolver(ollama, searxng)
     pipeline = ExtractionPipeline(ollama)
     normalizer = ValueNormalizer(ollama)
-    semantic_matcher = SemanticMatcher(ollama)
+    # Optional TEI vector tier for the semantic attribute→label match — enabled
+    # only when tei_dense_url is set; otherwise SemanticMatcher stays LLM-only.
+    tei = (
+        TeiGateway(
+            client, settings.tei_dense_url,
+            rerank_url=settings.tei_rerank_url or None,
+            timeout=settings.tei_timeout_seconds,
+        )
+        if settings.tei_dense_url
+        else None
+    )
+    semantic_matcher = SemanticMatcher(ollama, tei)
     cache = TTLCacheStore(settings.cache_max_size, settings.cache_ttl_seconds)
 
     app.state.searxng = searxng

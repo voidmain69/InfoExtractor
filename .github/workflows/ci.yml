@@ -45,8 +45,9 @@ jobs:
         run: python test_quality.py
 
       # Typed-resolve paths with mocked LLM/fetchers; deterministic core real.
+      # Plus the SemanticMatcher vector tier (dense ANN + rerank) with a fake TEI.
       - name: Resolve-service tests (pytest)
-        run: pytest test_from_source.py -q
+        run: pytest test_from_source.py test_semantic.py -q
 
   audit:
     name: Dependency vulnerability audit
